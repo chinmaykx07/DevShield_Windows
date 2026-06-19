@@ -10,6 +10,9 @@ DevShield lives in your system tray and does three things no other tool combines
 Built in Go. Scripts in PowerShell 7. Sensor data via LibreHardwareMonitor.  
 Bilingual interface: **English + Sanskrit (द्विभाषिक)**.
 
+> ⚠️ Experimental / intermediate-stage warning
+> DevShield is currently in an intermediate development stage and has not yet been validated through rigorous, broad real-world testing. The project may contain bugs, incomplete features, or behavior that could affect system stability, privacy settings, or network access. Anyone installing, downloading, or forking this repository should treat it as experimental software and use it at their own risk. We strongly recommend testing it on a disposable or non-critical Windows system, creating a restore point or backup first, and reviewing the scripts before execution.
+
 ---
 
 ## Install

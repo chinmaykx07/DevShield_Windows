@@ -1,5 +1,8 @@
 # Install DevShield
 
+> ⚠️ Warning
+> This project is still experimental and not yet rigorously tested. The installer and PowerShell scripts may change without notice and can make system-level changes. Do not install on mission-critical or production systems unless you understand the risks and have backups or a restore point.
+
 ## Prerequisites
 
 - Windows 10 17763+ or Windows 11

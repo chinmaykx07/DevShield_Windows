@@ -6,6 +6,7 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Pending before v0.1.0 tag
+- Project status: experimental / intermediate development; not yet rigorously tested in real-world environments
 - Phase B local build verification (see `docs/SHIP_PLAN.md`)
 - Phase C VM-based safety testing — full bricking-risk matrix
 - Phase D real hardware compatibility testing
