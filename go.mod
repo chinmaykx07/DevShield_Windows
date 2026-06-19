@@ -1,4 +1,4 @@
-module github.com/the_abstract_creator/devshield
+module github.com/chinmaykx07/DevShield_Windows
 
 go 1.22
 

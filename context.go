@@ -35,7 +35,7 @@ var gameProcesses = []string{
 	"valorant-win64-shipping", "fortnite",
 	"eldenring", "sekiro", "witcher3",
 	"cyberpunk2077", "gtav", "rdr2",
-	"minecraft", "javaw",   // Minecraft Java
+	"minecraft", "javaw", // Minecraft Java
 	"destiny2", "apex_legends",
 	"cs2", "csgo", "dota2",
 	"overwatch", "overwatch2", "battlenet",
@@ -43,21 +43,21 @@ var gameProcesses = []string{
 
 // devProcesses — any match triggers dev mode
 var devProcesses = []string{
-	"code",            // VS Code
+	"code", // VS Code
 	"code - insiders",
 	"cursor",
-	"idea64",          // IntelliJ
+	"idea64", // IntelliJ
 	"webstorm64",
 	"pycharm64",
 	"rider64",
 	"clion64",
-	"devenv",          // Visual Studio
+	"devenv", // Visual Studio
 	"sublime_text",
 	"atom",
 	// Runtimes that imply active dev work
 	"node",
-	"cargo",           // Rust building
-	"go",              // Go build
+	"cargo", // Rust building
+	"go",    // Go build
 	"python",
 	"python3",
 	// Build/container tools
@@ -70,7 +70,7 @@ var devProcesses = []string{
 
 // quiet hours: 23:00–07:00 → prefer silent if nothing else matches
 const quietHourStart = 23
-const quietHourEnd   = 7
+const quietHourEnd = 7
 
 // ── CONTEXT DETECTOR STATE ────────────────────────────────────
 
@@ -78,7 +78,7 @@ type ContextDetector struct {
 	mu               sync.RWMutex
 	enabled          bool
 	lastDetected     ThermalMode
-	manualOverride   time.Time  // suppress auto-switch until this time
+	manualOverride   time.Time // suppress auto-switch until this time
 	overrideDuration time.Duration
 	stopCh           chan struct{}
 }
@@ -136,13 +136,17 @@ func (c *ContextDetector) runDetector() {
 }
 
 func (c *ContextDetector) detect() {
-	if !c.isEnabled() { return }
+	if !c.isEnabled() {
+		return
+	}
 
 	// Respect manual override window
 	c.mu.RLock()
 	overrideActive := time.Now().Before(c.manualOverride)
 	c.mu.RUnlock()
-	if overrideActive { return }
+	if overrideActive {
+		return
+	}
 
 	best := c.detectBestMode()
 
@@ -175,11 +179,13 @@ func (c *ContextDetector) detectBestMode() ThermalMode {
 	}
 
 	hasGame := false
-	hasDev  := false
+	hasDev := false
 
 	for _, p := range procs {
 		name, err := p.Name()
-		if err != nil { continue }
+		if err != nil {
+			continue
+		}
 		nameLower := strings.ToLower(name)
 
 		if !hasGame {
@@ -198,7 +204,9 @@ func (c *ContextDetector) detectBestMode() ThermalMode {
 				}
 			}
 		}
-		if hasGame { break } // gaming wins — no need to scan further
+		if hasGame {
+			break
+		} // gaming wins — no need to scan further
 	}
 
 	switch {
@@ -257,9 +265,13 @@ func SuppressAutoSwitch() {
 func GetDSConfig() map[string]interface{} {
 	home, _ := os.UserHomeDir()
 	data, err := os.ReadFile(filepath.Join(home, ".devshield", "config.json"))
-	if err != nil { return nil }
+	if err != nil {
+		return nil
+	}
 	var m map[string]interface{}
-	if err := json.Unmarshal(data, &m); err != nil { return nil }
+	if err := json.Unmarshal(data, &m); err != nil {
+		return nil
+	}
 	return m
 }
 
@@ -269,10 +281,14 @@ func SetDSConfigKey(key string, value interface{}) {
 	path := filepath.Join(home, ".devshield", "config.json")
 
 	m := GetDSConfig()
-	if m == nil { m = map[string]interface{}{} }
+	if m == nil {
+		m = map[string]interface{}{}
+	}
 	m[key] = value
 
 	data, err := json.MarshalIndent(m, "", "  ")
-	if err != nil { return }
+	if err != nil {
+		return
+	}
 	_ = os.WriteFile(path, data, 0644)
 }

@@ -148,7 +148,7 @@ DevShield is designed to be **verifiable**, not just trusted.
 ### Verify a release
 ```powershell
 # Option 1 — GitHub Attestation (requires gh CLI)
-gh attestation verify devshield.exe --repo the_abstract_creator/devshield
+gh attestation verify devshield.exe --repo chinmaykx07/DevShield_Windows
 
 # Option 2 — Sigstore signature
 cosign verify-blob devshield.exe `
@@ -200,8 +200,8 @@ PS scripts write events to `~/.devshield/events/`. The Go tray app watches that 
 
 ```powershell
 # Clone
-git clone https://github.com/the_abstract_creator/devshield
-cd devshield
+git clone https://github.com/chinmaykx07/DevShield_Windows
+cd DevShield_Windows
 
 # Add your icon (see assets/icon.go for instructions)
 # assets/devshield.ico must exist before building

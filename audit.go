@@ -62,11 +62,11 @@ type AuditEvent struct {
 // ── MODULE STATE ─────────────────────────────────────────────
 
 var (
-	auditDB      *sql.DB
-	auditMu      sync.RWMutex
-	auditReady   bool
-	eventsDir    string
-	auditDBPath  string
+	auditDB     *sql.DB
+	auditMu     sync.RWMutex
+	auditReady  bool
+	eventsDir   string
+	auditDBPath string
 )
 
 // ── INIT ─────────────────────────────────────────────────────
@@ -79,9 +79,9 @@ func initAudit() error {
 		return fmt.Errorf("audit: cannot find home dir: %w", err)
 	}
 
-	dsHome      := filepath.Join(home, ".devshield")
-	eventsDir    = filepath.Join(dsHome, "events")
-	auditDBPath  = filepath.Join(dsHome, "audit.db")
+	dsHome := filepath.Join(home, ".devshield")
+	eventsDir = filepath.Join(dsHome, "events")
+	auditDBPath = filepath.Join(dsHome, "audit.db")
 
 	// Ensure directories exist
 	for _, d := range []string{dsHome, eventsDir} {
@@ -114,7 +114,7 @@ func initAudit() error {
 	}
 
 	auditMu.Lock()
-	auditDB    = db
+	auditDB = db
 	auditReady = true
 	auditMu.Unlock()
 
@@ -147,7 +147,7 @@ func closeAudit() {
 			Source:    "go",
 		})
 		_ = auditDB.Close()
-		auditDB    = nil
+		auditDB = nil
 		auditReady = false
 	}
 }
@@ -165,7 +165,9 @@ func runEventWatcher() {
 		auditMu.RLock()
 		ready := auditReady
 		auditMu.RUnlock()
-		if !ready { continue }
+		if !ready {
+			continue
+		}
 
 		processEventQueue()
 	}
@@ -173,7 +175,9 @@ func runEventWatcher() {
 
 func processEventQueue() {
 	matches, err := filepath.Glob(filepath.Join(eventsDir, "evt_*.json"))
-	if err != nil || len(matches) == 0 { return }
+	if err != nil || len(matches) == 0 {
+		return
+	}
 
 	for _, path := range matches {
 		if err := processEventFile(path); err != nil {
@@ -184,7 +188,9 @@ func processEventQueue() {
 
 func processEventFile(path string) error {
 	data, err := os.ReadFile(path)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 
 	var evt AuditEvent
 	if err := json.Unmarshal(data, &evt); err != nil {
@@ -193,10 +199,18 @@ func processEventFile(path string) error {
 	}
 
 	// Ensure required fields
-	if evt.ID        == "" { evt.ID        = generateID() }
-	if evt.Timestamp == "" { evt.Timestamp = nowISO() }
-	if evt.Status    == "" { evt.Status    = "ok" }
-	if evt.Source    == "" { evt.Source    = "powershell" }
+	if evt.ID == "" {
+		evt.ID = generateID()
+	}
+	if evt.Timestamp == "" {
+		evt.Timestamp = nowISO()
+	}
+	if evt.Status == "" {
+		evt.Status = "ok"
+	}
+	if evt.Source == "" {
+		evt.Source = "powershell"
+	}
 
 	if err := writeAuditDirect(evt); err != nil {
 		return fmt.Errorf("insert: %w", err)
@@ -213,7 +227,9 @@ func writeAuditDirect(evt AuditEvent) error {
 	auditMu.RLock()
 	db := auditDB
 	auditMu.RUnlock()
-	if db == nil { return nil }
+	if db == nil {
+		return nil
+	}
 
 	_, err := db.Exec(`
 		INSERT OR REPLACE INTO events
@@ -254,7 +270,9 @@ func GetAlertCount() int {
 	auditMu.RLock()
 	db := auditDB
 	auditMu.RUnlock()
-	if db == nil { return 0 }
+	if db == nil {
+		return 0
+	}
 
 	var count int
 	_ = db.QueryRow(`
@@ -294,7 +312,9 @@ func GetThermalHistory(n int) []AuditEvent {
 // GetLatestModeChange returns the most recent thermal profile event.
 func GetLatestModeChange() *AuditEvent {
 	evts := GetThermalHistory(1)
-	if len(evts) == 0 { return nil }
+	if len(evts) == 0 {
+		return nil
+	}
 	return &evts[0]
 }
 
@@ -318,7 +338,9 @@ func queryEvents(query string, args ...any) []AuditEvent {
 	auditMu.RLock()
 	db := auditDB
 	auditMu.RUnlock()
-	if db == nil { return nil }
+	if db == nil {
+		return nil
+	}
 
 	rows, err := db.Query(query, args...)
 	if err != nil {
@@ -338,10 +360,10 @@ func queryEvents(query string, args ...any) []AuditEvent {
 		); err != nil {
 			continue
 		}
-		e.Detail       = detail.String
-		e.Mode         = mode.String
+		e.Detail = detail.String
+		e.Mode = mode.String
 		e.RollbackJSON = rollback.String
-		e.Source       = source.String
+		e.Source = source.String
 		events = append(events, e)
 	}
 	return events

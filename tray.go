@@ -94,26 +94,26 @@ func buildMenu() {
 	// ── Thermal profiles ─────────────────────────────────────
 	tr.mSilent = systray.AddMenuItem(T(LblModeSilent), "Quiet, cool — ideal for writing and calls")
 	tr.mGaming = systray.AddMenuItem(T(LblModeGaming), "Full performance — enables CPU boost")
-	tr.mDev    = systray.AddMenuItem(T(LblModeDev),    "Balanced — optimised for coding and builds")
+	tr.mDev = systray.AddMenuItem(T(LblModeDev), "Balanced — optimised for coding and builds")
 	systray.AddSeparator()
 
 	// ── Privacy ──────────────────────────────────────────────
-	mPrivacy           := systray.AddMenuItem(T(LblPrivacy), "")
-	tr.mPrivacyApply    = mPrivacy.AddSubMenuItem(
+	mPrivacy := systray.AddMenuItem(T(LblPrivacy), "")
+	tr.mPrivacyApply = mPrivacy.AddSubMenuItem(
 		bilingual("Apply Telemetry Sinkhole", "टेलीमेट्री सिंकहोल लागू करें"), "")
-	mPrivacyRollback   := mPrivacy.AddSubMenuItem(
+	mPrivacyRollback := mPrivacy.AddSubMenuItem(
 		bilingual("Remove Sinkhole (Rollback)", "सिंकहोल हटाएं (पुनःस्थापना)"), "")
 
 	_ = mPrivacyRollback // wired below
 
 	// ── Network Guardian ─────────────────────────────────────
-	mGuardian           := systray.AddMenuItem(T(LblNetwork), "")
-	tr.mGuardianStart    = mGuardian.AddSubMenuItem(
+	mGuardian := systray.AddMenuItem(T(LblNetwork), "")
+	tr.mGuardianStart = mGuardian.AddSubMenuItem(
 		bilingual("Start Guardian", "रक्षक आरंभ करें"), "")
-	tr.mGuardianStop     = mGuardian.AddSubMenuItem(
+	tr.mGuardianStop = mGuardian.AddSubMenuItem(
 		bilingual("Stop Guardian", "रक्षक बंद करें"), "")
 	mGuardian.AddSubMenuItem("──────────────", "").Disable()
-	tr.mGuardianAlerts   = mGuardian.AddSubMenuItem(FormatAlertBadge(), "")
+	tr.mGuardianAlerts = mGuardian.AddSubMenuItem(FormatAlertBadge(), "")
 	tr.mGuardianAlerts.Disable()
 
 	// Sync initial guardian state
@@ -124,15 +124,15 @@ func buildMenu() {
 	// ── Tools ─────────────────────────────────────────────────
 	tr.mDashboard = systray.AddMenuItem(
 		bilingual("📋 Open Dashboard", "📋 निरीक्षण-पट खोलें"), "Live hardware monitor")
-	tr.mRollback  = systray.AddMenuItem(
+	tr.mRollback = systray.AddMenuItem(
 		bilingual("↩  Rollback…", "↩  पुनःस्थापना…"), "Undo any DevShield change")
 	systray.AddSeparator()
 
 	// ── Language submenu ──────────────────────────────────────
-	mLang      := systray.AddMenuItem(T(LblLanguage), "")
+	mLang := systray.AddMenuItem(T(LblLanguage), "")
 	tr.mLangBOTH = mLang.AddSubMenuItem(T(LblLangBOTH), "")
-	tr.mLangEN   = mLang.AddSubMenuItem(T(LblLangEN),   "")
-	tr.mLangSA   = mLang.AddSubMenuItem(T(LblLangSA),   "")
+	tr.mLangEN = mLang.AddSubMenuItem(T(LblLangEN), "")
+	tr.mLangSA = mLang.AddSubMenuItem(T(LblLangSA), "")
 	refreshLangChecks()
 
 	// ── Auto-switch ───────────────────────────────────────────
@@ -238,7 +238,7 @@ func startClickRouter() {
 
 			case <-tr.mGuardianStop.ClickedCh:
 				go func() {
-					_ = RunScriptDirect("monitor/network_guardian.ps1", "-Stop")
+					_, _ = RunScriptDirect("monitor/network_guardian.ps1", "-Stop")
 					updateGuardianItems()
 				}()
 
@@ -298,7 +298,9 @@ func startClickRouter() {
 
 func applyAndUpdate(mode ThermalMode) {
 	// Disable all profile items while applying
-	tr.mSilent.Disable(); tr.mGaming.Disable(); tr.mDev.Disable()
+	tr.mSilent.Disable()
+	tr.mGaming.Disable()
+	tr.mDev.Disable()
 	tr.status.SetTitle(ApplyingStatus())
 
 	go func() {
@@ -306,7 +308,9 @@ func applyAndUpdate(mode ThermalMode) {
 			log.Printf("tray: apply %s failed: %v", mode, err)
 		}
 		// Re-enable — mode change callback updates the actual label
-		tr.mSilent.Enable(); tr.mGaming.Enable(); tr.mDev.Enable()
+		tr.mSilent.Enable()
+		tr.mGaming.Enable()
+		tr.mDev.Enable()
 	}()
 }
 
@@ -363,12 +367,14 @@ func refreshProfileChecks(active ThermalMode) {
 func refreshLangChecks() {
 	cur := lang.Get()
 	tr.mLangBOTH.SetTitle(langCheckLabel(LangBOTH, T(LblLangBOTH), cur))
-	tr.mLangEN.SetTitle(langCheckLabel(LangEN,   T(LblLangEN),   cur))
-	tr.mLangSA.SetTitle(langCheckLabel(LangSA,   T(LblLangSA),   cur))
+	tr.mLangEN.SetTitle(langCheckLabel(LangEN, T(LblLangEN), cur))
+	tr.mLangSA.SetTitle(langCheckLabel(LangSA, T(LblLangSA), cur))
 }
 
 func langCheckLabel(m LangMode, label string, cur LangMode) string {
-	if m == cur { return "● " + label }
+	if m == cur {
+		return "● " + label
+	}
 	return "  " + label
 }
 

@@ -57,20 +57,20 @@ var taskModeMap = map[string]string{
 // Mirrors the JSON written by PS scripts on their last stdout line
 
 type PSResult struct {
-	Status    string  `json:"status"`     // "ok" | "warn" | "fail" | "cancelled"
-	Mode      string  `json:"mode"`
-	Detail    string  `json:"detail"`
-	Verified  bool    `json:"verified"`
-	Timestamp string  `json:"timestamp"`
+	Status    string `json:"status"` // "ok" | "warn" | "fail" | "cancelled"
+	Mode      string `json:"mode"`
+	Detail    string `json:"detail"`
+	Verified  bool   `json:"verified"`
+	Timestamp string `json:"timestamp"`
 	// Thermal-specific
-	BeforeCPU  float64 `json:"before_cpu_c"`
-	AfterCPU   float64 `json:"after_cpu_c"`
-	DeltaCPU   float64 `json:"delta_cpu_c"`
-	FreqMHz    float64 `json:"freq_actual_mhz"`
-	BoostOn    bool    `json:"boost_active"`
+	BeforeCPU float64 `json:"before_cpu_c"`
+	AfterCPU  float64 `json:"after_cpu_c"`
+	DeltaCPU  float64 `json:"delta_cpu_c"`
+	FreqMHz   float64 `json:"freq_actual_mhz"`
+	BoostOn   bool    `json:"boost_active"`
 	// Privacy-specific
-	DomainsAdded int  `json:"domains_added"`
-	RegApplied   int  `json:"reg_applied"`
+	DomainsAdded int `json:"domains_added"`
+	RegApplied   int `json:"reg_applied"`
 	// Tor-specific
 	RollbackID  string `json:"rollback_id"`
 	MACChanged  int    `json:"mac_changed"`
@@ -82,7 +82,9 @@ type PSResult struct {
 // scriptRoot returns the scripts/ directory relative to the running .exe
 func scriptRoot() string {
 	exe, err := os.Executable()
-	if err != nil { return "scripts" }
+	if err != nil {
+		return "scripts"
+	}
 	return filepath.Join(filepath.Dir(exe), "scripts")
 }
 
@@ -189,9 +191,9 @@ func runTaskDirect(taskName string, timeout time.Duration) (*DSState, error) {
 // the parsed JSON result from the last stdout line.
 // Used for read-only operations and informational scripts.
 func RunScriptDirect(relPath string, args ...string) (*PSResult, error) {
-	path   := scriptPath(relPath)
+	path := scriptPath(relPath)
 	psArgs := []string{"-NonInteractive", "-WindowStyle", "Hidden", "-File", path}
-	psArgs  = append(psArgs, args...)
+	psArgs = append(psArgs, args...)
 
 	cmd := exec.Command("pwsh", psArgs...)
 	hideWindow(cmd)
@@ -220,7 +222,7 @@ func parseLastJSONLine(output string) *PSResult {
 			}
 		}
 	}
-	return &PSResult{Status: "ok"}  // no JSON found — treat as success
+	return &PSResult{Status: "ok"} // no JSON found — treat as success
 }
 
 // ── OPENER (new visible terminal window) ─────────────────────
@@ -228,14 +230,14 @@ func parseLastJSONLine(output string) *PSResult {
 // OpenScriptWindow opens a PS script in a new visible Windows Terminal
 // window. Used for dashboard, profile manager, rollback interactive mode.
 func OpenScriptWindow(relPath string, args ...string) error {
-	path   := scriptPath(relPath)
+	path := scriptPath(relPath)
 	psArgs := append([]string{"-File", path}, args...)
 
 	// Try Windows Terminal first (better Unicode/Devanagari rendering)
 	wtArgs := []string{"new-tab", "powershell.exe",
 		"-NonInteractive", "-File", path}
-	wtArgs  = append(wtArgs, args...)
-	wt      := exec.Command("wt", wtArgs...)
+	wtArgs = append(wtArgs, args...)
+	wt := exec.Command("wt", wtArgs...)
 	if err := wt.Start(); err == nil {
 		log.Printf("ps_bridge: opened in WT: %s", relPath)
 		return nil
@@ -258,10 +260,14 @@ func PollStateChange(key, expected string, timeout time.Duration) (*DSState, err
 		if s != nil {
 			var actual string
 			switch key {
-			case "thermal_mode":       actual = s.ThermalMode
-			case "guardian_running":   actual = fmt.Sprintf("%v", s.GuardianRunning)
-			case "privacy_active":     actual = fmt.Sprintf("%v", s.PrivacyActive)
-			case "tor_active":         actual = fmt.Sprintf("%v", s.TorActive)
+			case "thermal_mode":
+				actual = s.ThermalMode
+			case "guardian_running":
+				actual = fmt.Sprintf("%v", s.GuardianRunning)
+			case "privacy_active":
+				actual = fmt.Sprintf("%v", s.PrivacyActive)
+			case "tor_active":
+				actual = fmt.Sprintf("%v", s.TorActive)
 			}
 			if actual == expected {
 				return s, nil
@@ -293,14 +299,20 @@ type DSState struct {
 // Returns a zero-value DSState (not nil) if the file is missing.
 func ReadCurrentState() *DSState {
 	home, err := os.UserHomeDir()
-	if err != nil { return &DSState{} }
+	if err != nil {
+		return &DSState{}
+	}
 	path := filepath.Join(home, ".devshield", "state.json")
 
 	data, err := os.ReadFile(path)
-	if err != nil { return &DSState{} }
+	if err != nil {
+		return &DSState{}
+	}
 
 	var s DSState
-	if err := json.Unmarshal(data, &s); err != nil { return &DSState{} }
+	if err := json.Unmarshal(data, &s); err != nil {
+		return &DSState{}
+	}
 	return &s
 }
 
@@ -342,7 +354,9 @@ func AreTasksRegistered() (int, int) {
 	}
 	ok := 0
 	for _, t := range tasks {
-		if IsTaskRegistered(t) { ok++ }
+		if IsTaskRegistered(t) {
+			ok++
+		}
 	}
 	return ok, len(tasks)
 }

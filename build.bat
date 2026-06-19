@@ -16,7 +16,7 @@ setlocal EnableDelayedExpansion
 set VERSION=0.1.0-dev
 set OUT_DIR=dist
 set EXE_NAME=devshield.exe
-set MODULE=github.com/the_abstract_creator/devshield
+set MODULE=github.com/chinmaykx07/DevShield_Windows
 
 :: ── Parse argument ───────────────────────────────────────────
 set BUILD_MODE=%1

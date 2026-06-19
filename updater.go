@@ -28,12 +28,12 @@ import (
 // ── TYPES ────────────────────────────────────────────────────
 
 type UpdateState struct {
-	mu             sync.RWMutex
-	latestVersion  string       // "v0.2.0" or ""
-	available      bool
-	dismissed      string       // version the user dismissed — don't re-notify
-	callbacks      []func(string) // fired with new version string
-	stopCh         chan struct{}
+	mu            sync.RWMutex
+	latestVersion string // "v0.2.0" or ""
+	available     bool
+	dismissed     string         // version the user dismissed — don't re-notify
+	callbacks     []func(string) // fired with new version string
+	stopCh        chan struct{}
 }
 
 var updater = &UpdateState{
@@ -43,10 +43,10 @@ var updater = &UpdateState{
 // ── GITHUB API RESPONSE ───────────────────────────────────────
 
 type ghRelease struct {
-	TagName    string `json:"tag_name"`    // "v0.2.0"
+	TagName    string `json:"tag_name"` // "v0.2.0"
 	Prerelease bool   `json:"prerelease"`
 	Draft      bool   `json:"draft"`
-	HTMLURL    string `json:"html_url"`    // release page URL
+	HTMLURL    string `json:"html_url"` // release page URL
 }
 
 // ── INIT / SHUTDOWN ───────────────────────────────────────────
@@ -107,9 +107,9 @@ func (u *UpdateState) check() {
 
 	u.mu.Lock()
 	u.latestVersion = latest
-	u.available     = true
-	dismissed       := u.dismissed
-	cbs             := u.callbacks
+	u.available = true
+	dismissed := u.dismissed
+	cbs := u.callbacks
 	u.mu.Unlock()
 
 	if dismissed == latest {
@@ -127,8 +127,8 @@ func (u *UpdateState) check() {
 
 // ── GITHUB API ────────────────────────────────────────────────
 
-const repoOwner = "the_abstract_creator"  // placeholder — GitHub Copilot / maintainer to finalize before release
-const repoName  = "devshield"
+const repoOwner = "chinmaykx07"
+const repoName = "DevShield_Windows"
 
 func fetchLatestRelease() (tag, url string, err error) {
 	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest",

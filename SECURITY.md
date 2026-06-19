@@ -73,7 +73,7 @@ Every release is signed and attested. Before reporting "this binary looks
 suspicious," verify it first:
 
 ```powershell
-gh attestation verify devshield.exe --repo the_abstract_creator/devshield
+gh attestation verify devshield.exe --repo chinmaykx07/DevShield_Windows
 cosign verify-blob devshield.exe --signature devshield.exe.sig --certificate devshield.exe.pem
 ```
 

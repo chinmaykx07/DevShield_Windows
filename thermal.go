@@ -26,17 +26,17 @@ const (
 
 // ModeInfo holds display data for one thermal mode
 type ModeInfo struct {
-	Mode    ThermalMode
-	Icon    string
-	LabelEN string
-	LabelSA string
+	Mode     ThermalMode
+	Icon     string
+	LabelEN  string
+	LabelSA  string
 	TaskName string
 }
 
 var allModes = []ModeInfo{
-	{ModeSilent, "🔇", "Silent Summer",   "मौन-ग्रीष्म",     TaskSilentSummer},
-	{ModeGaming, "🎮", "Gaming Gear",     "क्रीडा-आवृत्ति",   TaskGamingGear},
-	{ModeDev,    "💻", "Dev Mode",        "विकास-अवस्था",    TaskDevMode},
+	{ModeSilent, "🔇", "Silent Summer", "मौन-ग्रीष्म", TaskSilentSummer},
+	{ModeGaming, "🎮", "Gaming Gear", "क्रीडा-आवृत्ति", TaskGamingGear},
+	{ModeDev, "💻", "Dev Mode", "विकास-अवस्था", TaskDevMode},
 }
 
 // ── THERMAL MANAGER ──────────────────────────────────────────
@@ -44,7 +44,7 @@ var allModes = []ModeInfo{
 type ThermalManager struct {
 	mu          sync.RWMutex
 	currentMode ThermalMode
-	applying    bool          // true while a profile is being applied
+	applying    bool // true while a profile is being applied
 	onChange    []func(ThermalMode)
 	stopWatcher chan struct{}
 }
@@ -179,9 +179,13 @@ func (tm *ThermalManager) runStateWatcher() {
 			return
 		case <-ticker.C:
 			s := ReadCurrentState()
-			if s == nil { continue }
+			if s == nil {
+				continue
+			}
 			newMode := ThermalMode(s.ThermalMode)
-			if newMode == "" { newMode = ModeUnknown }
+			if newMode == "" {
+				newMode = ModeUnknown
+			}
 			tm.setMode(newMode)
 		}
 	}
@@ -201,26 +205,31 @@ func ModeLabel(mode ThermalMode) string {
 // ModeIcon returns the emoji for a mode.
 func ModeIcon(mode ThermalMode) string {
 	info := getModeInfo(mode)
-	if info == nil { return "⬜" }
+	if info == nil {
+		return "⬜"
+	}
 	return info.Icon
 }
 
 // ModeFullLabel returns "🔇 Silent Summer · मौन-ग्रीष्म"
 func ModeFullLabel(mode ThermalMode) string {
 	info := getModeInfo(mode)
-	if info == nil { return string(mode) }
+	if info == nil {
+		return string(mode)
+	}
 	return fmt.Sprintf("%s %s", info.Icon, bilingual(info.LabelEN, info.LabelSA))
 }
 
 // CurrentModeStatus returns a one-line status for the tray tooltip.
-//   e.g. "🔇 Silent Summer  ·  Applied 14m ago"
+//
+//	e.g. "🔇 Silent Summer  ·  Applied 14m ago"
 func CurrentModeStatus() string {
 	mode := thermal.getMode()
 	if mode == ModeUnknown {
 		return bilingual("No profile active", "कोई आकृति नहीं")
 	}
 
-	s       := ReadCurrentState()
+	s := ReadCurrentState()
 	sinceStr := ""
 	if s != nil && s.ThermalAppliedAt != "" {
 		t, err := time.Parse(time.RFC3339, s.ThermalAppliedAt)
@@ -269,7 +278,9 @@ func getModeInfo(mode ThermalMode) *ModeInfo {
 
 func modeToTask(mode ThermalMode) string {
 	info := getModeInfo(mode)
-	if info == nil { return "" }
+	if info == nil {
+		return ""
+	}
 	return info.TaskName
 }
 
@@ -280,10 +291,14 @@ func bilingual(en, sa string) string {
 	case LangEN:
 		return en
 	case LangSA:
-		if sa != "" { return sa }
+		if sa != "" {
+			return sa
+		}
 		return en
 	default: // BOTH
-		if sa != "" { return en + "  ·  " + sa }
+		if sa != "" {
+			return en + "  ·  " + sa
+		}
 		return en
 	}
 }

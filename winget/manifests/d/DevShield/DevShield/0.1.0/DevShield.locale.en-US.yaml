@@ -2,13 +2,13 @@ PackageIdentifier: DevShield.DevShield
 PackageVersion: 0.1.0
 PackageLocale: en-US
 Publisher: DevShield Project
-PublisherUrl: https://github.com/the_abstract_creator/devshield
-PublisherSupportUrl: https://github.com/the_abstract_creator/devshield/issues
-PrivacyUrl: https://github.com/the_abstract_creator/devshield#trust
+PublisherUrl: https://github.com/chinmaykx07/DevShield_Windows
+PublisherSupportUrl: https://github.com/chinmaykx07/DevShield_Windows/issues
+PrivacyUrl: https://github.com/chinmaykx07/DevShield_Windows#trust
 PackageName: DevShield
-PackageUrl: https://github.com/the_abstract_creator/devshield
+PackageUrl: https://github.com/chinmaykx07/DevShield_Windows
 License: Apache-2.0
-LicenseUrl: https://github.com/the_abstract_creator/devshield/blob/main/LICENSE
+LicenseUrl: https://github.com/chinmaykx07/DevShield_Windows/blob/main/LICENSE
 Copyright: Copyright 2026 DevShield Project
 ShortDescription: Privacy · Thermal · Network Intelligence for Windows developers
 Description: |-
@@ -35,6 +35,6 @@ Tags:
   - network-monitor
   - security
   - system-tray
-ReleaseNotesUrl: https://github.com/the_abstract_creator/devshield/releases/tag/v0.1.0
+ReleaseNotesUrl: https://github.com/chinmaykx07/DevShield_Windows/releases/tag/v0.1.0
 ManifestType: locale
 ManifestVersion: 1.6.0

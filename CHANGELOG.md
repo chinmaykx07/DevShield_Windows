@@ -12,7 +12,7 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 - `docs/INSTALL.md`, `docs/USER_MANUAL.md`, `docs/TROUBLESHOOTING.md` — not yet written
 - `go.sum` — must be generated via `go mod tidy` (requires network access to the Go module proxy, not available in this packaging environment)
 - WinGet manifest PR submission to `microsoft/winget-pkgs`
-- Real GitHub username substitution (currently `the_abstract_creator` placeholder in `go.mod`, `build.bat`, `updater.go`, and both WinGet YAML files)
+- GitHub repository path updated to `chinmaykx07/DevShield_Windows` in the app metadata and packaging files
 
 ## [0.1.0] — unreleased
 
@@ -42,5 +42,5 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 - No profile export/import yet
 - No Scoop bucket yet
 
-[Unreleased]: https://github.com/the_abstract_creator/devshield/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/the_abstract_creator/devshield/releases/tag/v0.1.0
+[Unreleased]: https://github.com/chinmaykx07/DevShield_Windows/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/chinmaykx07/DevShield_Windows/releases/tag/v0.1.0

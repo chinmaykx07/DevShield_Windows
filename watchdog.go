@@ -20,11 +20,11 @@ import (
 // ── WATCHDOG STATE ───────────────────────────────────────────
 
 type AlertWatchdog struct {
-	mu           sync.RWMutex
-	lastCount    int
-	callbacks    []func(int)  // fired when count changes
-	stopCh       chan struct{}
-	guardianUp   bool         // mirrors state.json guardian_running
+	mu         sync.RWMutex
+	lastCount  int
+	callbacks  []func(int) // fired when count changes
+	stopCh     chan struct{}
+	guardianUp bool // mirrors state.json guardian_running
 }
 
 var watchdog = &AlertWatchdog{
@@ -79,11 +79,11 @@ func (w *AlertWatchdog) poll() {
 	guardianUp := s != nil && s.GuardianRunning
 
 	w.mu.Lock()
-	countChanged   := newCount != w.lastCount
+	countChanged := newCount != w.lastCount
 	guardianChanged := guardianUp != w.guardianUp
-	w.lastCount   = newCount
-	w.guardianUp  = guardianUp
-	cbs           := w.callbacks
+	w.lastCount = newCount
+	w.guardianUp = guardianUp
+	cbs := w.callbacks
 	w.mu.Unlock()
 
 	if countChanged {
@@ -154,7 +154,7 @@ func FormatGuardianStatus() string {
 // formatted for a tooltip or sub-menu.
 func RecentAlertLines(n int) []string {
 	events := GetGuardianAlerts(n)
-	lines  := make([]string, 0, len(events))
+	lines := make([]string, 0, len(events))
 	for _, e := range events {
 		ts := ""
 		if len(e.Timestamp) >= 19 {

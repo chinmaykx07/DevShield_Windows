@@ -32,23 +32,23 @@ const (
 type LabelKey string
 
 const (
-	LblAppTitle  LabelKey = "app_title"
-	LblStatus    LabelKey = "status"
+	LblAppTitle   LabelKey = "app_title"
+	LblStatus     LabelKey = "status"
 	LblModeSilent LabelKey = "mode_silent"
 	LblModeGaming LabelKey = "mode_gaming"
-	LblModeDev   LabelKey = "mode_dev"
-	LblPrivacy   LabelKey = "privacy"
-	LblNetwork   LabelKey = "network"
-	LblAuditLog  LabelKey = "audit_log"
-	LblLanguage  LabelKey = "language"
-	LblLangEN    LabelKey = "lang_en"
-	LblLangSA    LabelKey = "lang_sa"
-	LblLangBOTH  LabelKey = "lang_both"
-	LblQuit      LabelKey = "quit"
+	LblModeDev    LabelKey = "mode_dev"
+	LblPrivacy    LabelKey = "privacy"
+	LblNetwork    LabelKey = "network"
+	LblAuditLog   LabelKey = "audit_log"
+	LblLanguage   LabelKey = "language"
+	LblLangEN     LabelKey = "lang_en"
+	LblLangSA     LabelKey = "lang_sa"
+	LblLangBOTH   LabelKey = "lang_both"
+	LblQuit       LabelKey = "quit"
 	LblAlertCount LabelKey = "alert_count"
-	LblNoAlerts  LabelKey = "no_alerts"
-	LblApplying  LabelKey = "applying"
-	LblVerified  LabelKey = "verified"
+	LblNoAlerts   LabelKey = "no_alerts"
+	LblApplying   LabelKey = "applying"
+	LblVerified   LabelKey = "verified"
 )
 
 // ── LABEL DICTIONARY ─────────────────────────────────────────
@@ -273,7 +273,7 @@ func (l *LangManager) writeToDisk(m LangMode) {
 	}
 
 	// Update only the language fields
-	cfg["language"]         = string(m)
+	cfg["language"] = string(m)
 	cfg["language_changed"] = time.Now().Format(time.RFC3339)
 
 	if b, err := json.MarshalIndent(cfg, "", "  "); err == nil {
