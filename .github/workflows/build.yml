@@ -1,0 +1,202 @@
+name: Build and Release
+
+# Triggers:
+#   Push a version tag (v0.1.0, v0.5.0 etc) → full build + sign + release
+#   Pull request → build only (verify it compiles, no release assets)
+
+on:
+  push:
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - main
+
+# Permissions required for:
+#   contents: write      → create GitHub Release + upload assets
+#   id-token: write      → Sigstore OIDC keyless signing
+#   attestations: write  → GitHub Artifact Attestation
+permissions:
+  contents:     write
+  id-token:     write
+  attestations: write
+
+jobs:
+  build:
+    name: Build DevShield Windows Binary
+    runs-on: windows-latest
+
+    steps:
+
+      # ── 1. Checkout ───────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history for version tags
+
+      # ── 2. Go toolchain ───────────────────────────────────────
+      - name: Set up Go 1.22
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: true       # cache go module downloads between runs
+
+      # ── 3. TDM-GCC (required for CGO — fyne-io/systray) ──────
+      # fyne-io/systray uses CGO for the Windows tray API.
+      # Without GCC, go build fails with "cgo: C compiler not found".
+      # TDM-GCC is the most reliable CGO-compatible GCC for Windows CI.
+      - name: Install TDM-GCC (CGO requirement)
+        run: |
+          choco install tdm-gcc --yes --no-progress
+        shell: powershell
+
+      - name: Add TDM-GCC to PATH
+        run: |
+          echo "C:\TDM-GCC-64\bin" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+        shell: powershell
+
+      - name: Verify GCC installation
+        run: gcc --version
+        shell: cmd
+
+      # ── 4. Download dependencies ──────────────────────────────
+      - name: Download Go modules
+        run: go mod download
+        env:
+          CGO_ENABLED: "1"
+
+      # ── 5. Build ──────────────────────────────────────────────
+      # -H=windowsgui : suppress console window flash on launch
+      # -s -w         : strip debug symbols → smaller binary
+      # CGO_ENABLED=1 : required for fyne-io/systray
+      - name: Build devshield.exe
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $env:CGO_ENABLED = "1"
+          $env:GOOS        = "windows"
+          $env:GOARCH      = "amd64"
+          go build `
+            -ldflags "-H=windowsgui -s -w -X main.dsVersion=${{ github.ref_name }}" `
+            -o dist\devshield.exe `
+            .
+          Write-Host "Build complete: $(Get-Item dist\devshield.exe | Select-Object -ExpandProperty Length) bytes"
+        shell: powershell
+
+      # ARM64 binary (Snapdragon / Surface Pro X etc)
+      - name: Build devshield-arm64.exe
+        run: |
+          $env:CGO_ENABLED = "1"
+          $env:GOOS        = "windows"
+          $env:GOARCH      = "arm64"
+          go build `
+            -ldflags "-H=windowsgui -s -w -X main.dsVersion=${{ github.ref_name }}" `
+            -o dist\devshield-arm64.exe `
+            .
+        shell: powershell
+        continue-on-error: true   # ARM64 build may fail if CGO cross-toolchain absent
+
+      # ── 6. Generate SHA256 checksums ─────────────────────────
+      - name: Generate SHA256 checksums
+        run: |
+          $files = Get-ChildItem dist\*.exe
+          $checksums = $files | ForEach-Object {
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash
+            "$hash  $($_.Name)"
+          }
+          $checksums | Out-File -FilePath dist\checksums.txt -Encoding utf8
+          Write-Host "Checksums:"
+          Get-Content dist\checksums.txt
+        shell: powershell
+
+      # ── 7. GitHub Artifact Attestation ────────────────────────
+      # Cryptographic proof that THIS binary was built from THIS commit
+      # by GitHub's infrastructure — not from a local machine.
+      # Verify with: gh attestation verify devshield.exe --repo OWNER/devshield
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: dist/devshield.exe
+
+      # ── 8. Sigstore keyless signing ───────────────────────────
+      # Signs the binary using the GitHub Actions OIDC token.
+      # Signature + certificate posted to public Rekor transparency log.
+      # Verify with:
+      #   cosign verify-blob devshield.exe \
+      #     --signature devshield.exe.sig \
+      #     --certificate devshield.exe.pem
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign with Sigstore (keyless)
+        run: |
+          cosign sign-blob dist/devshield.exe `
+            --output-signature dist/devshield.exe.sig `
+            --output-certificate dist/devshield.exe.pem `
+            --yes
+        shell: powershell
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+
+      # ── 9. Upload build artifacts (every push) ────────────────
+      # Available in Actions → Artifacts even on PR builds.
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: devshield-${{ github.ref_name }}-windows
+          path: |
+            dist/devshield.exe
+            dist/devshield-arm64.exe
+            dist/checksums.txt
+            dist/devshield.exe.sig
+            dist/devshield.exe.pem
+          retention-days: 30
+
+      # ── 10. Create GitHub Release (tags only) ─────────────────
+      # Only runs when a version tag is pushed (not on PRs).
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: DevShield ${{ github.ref_name }}
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}  # v0.1.0-beta → prerelease
+          body: |
+            ## DevShield ${{ github.ref_name }}
+
+            ### Install
+            **Via Winget (zero SmartScreen warning — recommended):**
+            ```
+            winget install DevShield.DevShield
+            ```
+            **Direct download:**
+            Download `devshield.exe` below and run it.
+            Windows will show an "Unknown Publisher" warning — click **More Info → Run Anyway**.
+            This is expected until the app builds SmartScreen reputation.
+
+            ### Verify this release
+            Every release is cryptographically verifiable:
+            ```powershell
+            # Verify build provenance (GitHub Attestation)
+            gh attestation verify devshield.exe --repo ${{ github.repository }}
+
+            # Verify Sigstore signature
+            cosign verify-blob devshield.exe `
+              --signature devshield.exe.sig `
+              --certificate devshield.exe.pem
+            ```
+
+            ### What's in this release
+            | File | Description |
+            |---|---|
+            | `devshield.exe` | Main binary (x64) |
+            | `devshield-arm64.exe` | ARM64 binary (Snapdragon / Surface) |
+            | `checksums.txt` | SHA256 hashes |
+            | `devshield.exe.sig` | Sigstore signature |
+            | `devshield.exe.pem` | Sigstore certificate |
+
+          files: |
+            dist/devshield.exe
+            dist/devshield-arm64.exe
+            dist/checksums.txt
+            dist/devshield.exe.sig
+            dist/devshield.exe.pem

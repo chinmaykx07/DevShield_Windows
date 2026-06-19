@@ -1,0 +1,30 @@
+PackageIdentifier: DevShield.DevShield
+PackageVersion: 0.1.0
+MinimumOSVersion: 10.0.17763.0
+InstallerType: inno
+Scope: machine
+InstallModes:
+  - interactive
+  - silent
+UpgradeBehavior: uninstallPrevious
+InstallerSwitches:
+  Silent: /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+  SilentWithProgress: /SILENT /SUPPRESSMSGBOXES /NORESTART
+  Upgrade: /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /UPGRADE
+InstallerSuccessCodes:
+  - 0
+Dependencies:
+  PackageDependencies:
+    - PackageIdentifier: Microsoft.PowerShell
+      MinimumVersion: "7.0.0"
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/the_abstract_creator/devshield/releases/download/v0.1.0/DevShield-v0.1.0-Setup.exe
+    InstallerSha256: REPLACE_WITH_ACTUAL_SHA256_AFTER_BUILD
+    ProductCode: "{8F4A2B1C-3D5E-4F67-A890-B1C2D3E4F5A6}_is1"
+  - Architecture: arm64
+    InstallerUrl: https://github.com/the_abstract_creator/devshield/releases/download/v0.1.0/DevShield-v0.1.0-arm64-Setup.exe
+    InstallerSha256: REPLACE_WITH_ACTUAL_ARM64_SHA256_AFTER_BUILD
+    ProductCode: "{8F4A2B1C-3D5E-4F67-A890-B1C2D3E4F5A6}_is1"
+ManifestType: installer
+ManifestVersion: 1.6.0

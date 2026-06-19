@@ -1,0 +1,40 @@
+PackageIdentifier: DevShield.DevShield
+PackageVersion: 0.1.0
+PackageLocale: en-US
+Publisher: DevShield Project
+PublisherUrl: https://github.com/the_abstract_creator/devshield
+PublisherSupportUrl: https://github.com/the_abstract_creator/devshield/issues
+PrivacyUrl: https://github.com/the_abstract_creator/devshield#trust
+PackageName: DevShield
+PackageUrl: https://github.com/the_abstract_creator/devshield
+License: Apache-2.0
+LicenseUrl: https://github.com/the_abstract_creator/devshield/blob/main/LICENSE
+Copyright: Copyright 2026 DevShield Project
+ShortDescription: Privacy · Thermal · Network Intelligence for Windows developers
+Description: |-
+  DevShield lives in your system tray and does three things no other tool combines:
+
+  Thermal profiles — Silent Summer, Gaming Gear, Dev Mode with real before/after
+  sensor verification. Every profile proves it worked with a measured temperature delta.
+
+  Privacy hardening — Telemetry sinkhole, registry tweaks, Tor kill-switch.
+  Full rollback by ID. Never breaks Windows Update.
+
+  Network watchdog — Per-process background monitor, alerts on unexpected connections.
+  Developer-aware: VS Code, Docker, Node, Chrome are pre-trusted. Telemetry processes are not.
+
+  Bilingual interface: English + Sanskrit (द्विभाषिक).
+  Built in Go. Scripts in PowerShell 7. Sensor data via LibreHardwareMonitor.
+  Cryptographically verifiable releases via Sigstore + GitHub Attestation.
+Moniker: devshield
+Tags:
+  - privacy
+  - thermal
+  - developer-tools
+  - windows
+  - network-monitor
+  - security
+  - system-tray
+ReleaseNotesUrl: https://github.com/the_abstract_creator/devshield/releases/tag/v0.1.0
+ManifestType: locale
+ManifestVersion: 1.6.0
