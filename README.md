@@ -15,6 +15,11 @@ Bilingual interface: **English + Sanskrit (द्विभाषिक)**.
 
 ---
 
+## Project status and credits
+
+- This project is still experimental and not yet rigorously tested.
+- For a record of the third-party libraries, SDKs, tools, and upstream projects used by DevShield, see [docs/CREDITS.md](docs/CREDITS.md).
+
 ## Install
 
 ### Via WinGet (recommended — zero SmartScreen warning)
