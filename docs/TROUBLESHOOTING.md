@@ -1,6 +1,6 @@
 # Troubleshooting
 
-Find your symptom below. Each entry has a likely cause and a concrete fix. If nothing here matches, see [SECURITY.md](../SECURITY.md) for how to report a problem that might be a real bug or safety issue.
+Find your symptom below. Each entry has a likely cause and a concrete fix. If nothing here matches, see [SECURITY.md](SECURITY.md) for how to report a problem that might be a real bug or safety issue.
 
 ---
 
@@ -16,7 +16,7 @@ winget install Microsoft.PowerShell
 Then close and reopen your terminal and re-run the installer or launch `devshield.exe` directly.
 
 ### `gh attestation verify` or `cosign verify-blob` fails
-Do not run the installer. This means the binary does not match what the official CI built and signed. See [SECURITY.md](../SECURITY.md).
+Do not run the installer. This means the binary does not match what the official CI built and signed. See [SECURITY.md](SECURITY.md).
 
 ---
 

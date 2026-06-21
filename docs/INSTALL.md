@@ -61,7 +61,7 @@ cosign verify-blob DevShield-v0.1.0-Setup.exe `
 # Compare the output against checksums.txt from the same release
 ```
 
-If any of these fail on an official release, do not run the installer and report it — see [SECURITY.md](../SECURITY.md).
+If any of these fail on an official release, do not run the installer and report it — see [SECURITY.md](SECURITY.md).
 
 ---
 
