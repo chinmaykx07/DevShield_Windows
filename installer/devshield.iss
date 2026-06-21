@@ -11,7 +11,7 @@
 #define AppName      "DevShield"
 #define AppVersion   "0.1.0"
 #define AppPublisher "DevShield Project"
-#define AppURL       "https://github.com/devshield/devshield"
+#define AppURL       "https://github.com/chinmaykx07/DevShield_Windows"
 #define AppExeName   "devshield.exe"
 #define AppID        "{{8F4A2B1C-3D5E-4F67-A890-B1C2D3E4F5A6}"
 
