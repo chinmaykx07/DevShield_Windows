@@ -388,8 +388,8 @@ function Invoke-RestoreAction {
     $ts      = try { ([datetime]$Action.AppliedAt).ToString("MMM dd HH:mm:ss") } catch { "unknown" }
     $dryTag  = if ($DryRunMode) { " [DRY RUN]" } else { "" }
 
-    Write-DS -EN "Restoring$dryTag: $($Action.Type)  (applied $ts)" `
-             -SA "पुनःस्थापन$dryTag: $($Action.Type)  (लागू $ts)" -Level WARN
+    Write-DS -EN "Restoring${dryTag}: $($Action.Type)  (applied $ts)" `
+             -SA "पुनःस्थापन${dryTag}: $($Action.Type)  (लागू $ts)" -Level WARN
     Write-DSSeparator
 
     $result = switch -Wildcard ($Action.Type) {

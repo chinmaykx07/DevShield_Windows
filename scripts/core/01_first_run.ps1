@@ -361,9 +361,7 @@ $DS_TASKS = @(
 )
 
 function Register-DSAdminTasks {
-    $isAdmin = ([Security.Principal.WindowsPrincipal]
-                [Security.Principal.WindowsIdentity]::GetCurrent()
-               ).IsInRole([Security.Principal.WindowsBuiltInRole]"Administrator")
+    $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]"Administrator")
 
     if (-not $isAdmin) {
         Write-DS -EN "One-time admin setup needed for Task Scheduler registration." `
