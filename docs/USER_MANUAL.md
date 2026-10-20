@@ -71,6 +71,25 @@ pwsh -File scripts\hardening\rollback.ps1 -Type privacy
 
 A guardian alert means a process made a network connection that is neither trusted nor known. This is informational, not a block.
 
+### Watching AI agents (Agent Watch)
+
+The tray menu **🤖 AI Agents** lists every AI agent running on this PC: coding agents (Claude Code, Codex, Gemini CLI, Copilot CLI…), AI IDEs (Cursor, Windsurf…), VS Code AI extensions, local model runtimes (Ollama, LM Studio…) and MCP servers. It scans every 10 seconds and needs no admin rights.
+
+Each agent is either **sanctioned** (you approved it) or **unsanctioned** (the default for anything new):
+
+| Icon | Meaning |
+|---|---|
+| ✅ | Sanctioned. No alerts while its program file stays the same. |
+| ⚠ | Known agent, not yet sanctioned. |
+| ❓ | Not in the catalog, but behaving like an AI agent (e.g. calling an LLM API and running shells). Check it. |
+
+To approve an agent, open its entry and select **Sanction this agent**. Agent Watch writes an audit event (visible in the audit log) when:
+- an agent appears for the first time (`AGENT_NEW`, or `AGENT_UNKNOWN` for ❓ processes)
+- a sanctioned agent's program file changes, which removes its approval (`AGENT_CHANGED`)
+- an unsanctioned agent starts running again (`AGENT_UNSANCTIONED_START`)
+
+Agent Watch only alerts. It never stops or blocks a process. To recognise an agent it doesn't know yet, copy the built-in catalog to `~/.devshield/agent_catalog.json` and add an entry; that file then replaces the built-in one. Command lines are redacted (API keys and tokens masked) before they are logged.
+
 ---
 
 ## 3. Pro Use

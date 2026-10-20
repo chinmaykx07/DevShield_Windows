@@ -5,7 +5,7 @@ Goal (kept deliberately simple):
 1. **Know every AI agent running on this machine.**
 2. **Alert when an unknown or new agent / AI process appears.**
 
-This is research plus a proposed design. No code has been written yet.
+**Status:** Phase 1 ("Agent Watch") is implemented in `agentwatch*.go`, `tray_agents.go` and `assets/agent_catalog.json`, with unit tests in `agentwatch_test.go`. It is not yet tested on Windows. The catalog's process names and paths still need confirming on a real machine. Not built yet: the MCP config-file scan (S4), Phase 2 and Phase 3.
 
 ---
 

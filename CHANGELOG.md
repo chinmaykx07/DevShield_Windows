@@ -5,6 +5,16 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+- Agent Watch: tray inventory of running AI agents (CLI agents, AI IDEs,
+  VS Code AI extensions, local model runtimes, MCP servers). Sanction or
+  leave unsanctioned; audit alerts for new, changed, unknown and
+  unsanctioned agents. Alert-only, no admin needed. Not yet tested on
+  Windows. See `docs/RESEARCH_AI_AGENT_MONITORING.md`.
+
+### Fixed
+- App froze on Quit (`closeAudit` self-deadlock on `auditMu`).
+
 ### Pending before v0.1.0 tag
 - Project status: experimental / intermediate development; not yet rigorously tested in real-world environments
 - Phase B local build verification (see `docs/SHIP_PLAN.md`)

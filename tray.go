@@ -39,6 +39,11 @@ type trayRefs struct {
 	mGuardianStop   *systray.MenuItem
 	mGuardianAlerts *systray.MenuItem
 
+	// AI agents (Agent Watch)
+	mAgents     *systray.MenuItem
+	mAgentsNone *systray.MenuItem
+	agentSlots  []agentSlot
+
 	// Tools
 	mDashboard *systray.MenuItem
 	mRollback  *systray.MenuItem
@@ -79,6 +84,7 @@ func onTrayExit() {
 	shutdownWatchdog()
 	shutdownThermal()
 	shutdownContextWatcher()
+	shutdownAgentWatch()
 	shutdownUpdater()
 	closeAudit()
 }
@@ -118,6 +124,9 @@ func buildMenu() {
 
 	// Sync initial guardian state
 	updateGuardianItems()
+
+	// ── AI agents (Agent Watch) ──────────────────────────────
+	buildAgentMenu()
 
 	systray.AddSeparator()
 
@@ -184,6 +193,9 @@ func wireCallbacks() {
 		updateMenuLabels()
 	})
 
+	// Running agents or sanction status changed → refresh agents menu
+	OnAgentsChanged(refreshAgentMenu)
+
 	// Update available → reveal the update menu item with version label
 	OnUpdateAvailable(func(version string) {
 		tr.mUpdate.SetTitle(bilingual(
@@ -197,6 +209,8 @@ func wireCallbacks() {
 // ── CLICK ROUTER ─────────────────────────────────────────────
 
 func startClickRouter() {
+	startAgentSlotRouters()
+
 	go func() {
 		for {
 			select {
@@ -340,6 +354,7 @@ func updateMenuLabels() {
 
 	refreshLangChecks()
 	refreshProfileChecks(thermal.getMode())
+	refreshAgentMenu()
 }
 
 // refreshProfileChecks puts "● " prefix on the active mode.

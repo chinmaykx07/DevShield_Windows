@@ -47,6 +47,9 @@ func main() {
 	// 6. Context watcher — auto mode switching (optional, user-controlled)
 	initContextWatcher()
 
+	// 6b. Agent Watch — inventories running AI agents, alerts on unsanctioned ones
+	initAgentWatch()
+
 	// 7. Update checker — polls GitHub Releases every 24h, non-blocking
 	initUpdater()
 

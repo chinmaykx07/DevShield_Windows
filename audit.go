@@ -136,16 +136,20 @@ func initAudit() error {
 
 // closeAudit flushes and closes the database.
 func closeAudit() {
+	// Write the stop event BEFORE taking the write lock: writeAuditDirect
+	// takes auditMu.RLock itself, and sync.RWMutex is not re-entrant, so
+	// calling it while holding Lock deadlocked the app on Quit.
+	writeAuditDirect(AuditEvent{
+		ID:        generateID(),
+		Timestamp: nowISO(),
+		Action:    "TRAY_STOPPED",
+		Status:    "ok",
+		Source:    "go",
+	})
+
 	auditMu.Lock()
 	defer auditMu.Unlock()
 	if auditDB != nil {
-		writeAuditDirect(AuditEvent{
-			ID:        generateID(),
-			Timestamp: nowISO(),
-			Action:    "TRAY_STOPPED",
-			Status:    "ok",
-			Source:    "go",
-		})
 		_ = auditDB.Close()
 		auditDB = nil
 		auditReady = false

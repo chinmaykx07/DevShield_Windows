@@ -77,7 +77,7 @@ Three independent failures, any one of which is enough:
 ### C6. Tor "kill-switch" doesn't block anything
 `tor_hardening.ps1:418-462` only creates **Allow** rules (plus a disabled sentinel). Windows Firewall's default outbound action is Allow, so all non-Tor traffic still flows. The CHANGELOG, README and script header all describe a "Tor-only outbound" kill-switch. This is a safety claim users may rely on.
 
-### C7. App hangs on Quit
+### C7. App hangs on Quit (FIXED alongside Agent Watch, regression test in `audit_test.go`)
 `audit.go:132` `closeAudit` holds `auditMu.Lock()` and calls `writeAuditDirect`, which calls `auditMu.RLock()`. `sync.RWMutex` is not re-entrant, so this deadlocks on every Quit.
 
 ### C8. Tray opens scripts the wrong way
