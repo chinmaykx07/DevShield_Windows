@@ -8,6 +8,9 @@
 //	sudo devshield sanction <id>   approve an agent (root only)
 //	sudo devshield revoke <id>     withdraw an approval (root only)
 //	devshield verify-log [path]    check the audit log's hash chain offline
+//	devshield sensors [--json]     temperatures, fans, power (no daemon needed)
+//	devshield profile              thermal controls, active profile, temps
+//	sudo devshield profile <name>  silent | gaming | dev | off (root only)
 
 package main
 
@@ -17,6 +20,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
 	"os/signal"
 	"os/user"
 	"strconv"
@@ -27,6 +31,7 @@ import (
 	"github.com/chinmaykx07/DevShield_Windows/internal/auditlog"
 	"github.com/chinmaykx07/DevShield_Windows/internal/daemon"
 	"github.com/chinmaykx07/DevShield_Windows/internal/ipc"
+	"github.com/chinmaykx07/DevShield_Windows/internal/sensors"
 )
 
 const cliUsage = `DevShield — keeps the machine under its owner's control
@@ -40,6 +45,9 @@ Usage:
   sudo devshield sanction <id>    approve an agent (requires root)
   sudo devshield revoke <id>      withdraw an approval (requires root)
   devshield verify-log [path]     verify an audit log's hash chain offline
+  devshield sensors [--json]      temperatures, fans and power (no daemon needed)
+  devshield profile               thermal controls, active profile and temperatures
+  sudo devshield profile <name>   silent | gaming | dev | off (off = original settings)
   devshield version
 
 Global flag (before or after the command): --socket PATH (default ` + ipc.DefaultSocket + `)
@@ -89,6 +97,13 @@ func runCLI(args []string, stdout, stderr io.Writer) int {
 			return 2
 		}
 		return cliPolicy(cmd, cargs[0], socket, stdout, stderr)
+	case "sensors":
+		return cliSensors(cargs, stdout)
+	case "profile":
+		if len(cargs) == 0 {
+			return cliThermal(socket, stdout, stderr)
+		}
+		return cliProfile(cargs[0], socket, stdout, stderr)
 	case "verify-log":
 		path := daemon.DefaultStateDir + "/audit.log"
 		if len(cargs) > 0 {
@@ -104,6 +119,7 @@ func cliDaemon(args []string, socket string, stderr io.Writer) int {
 	fs := flag.NewFlagSet("daemon", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	stateDir := fs.String("state-dir", daemon.DefaultStateDir, "root-only state directory")
+	sysRoot := fs.String("sys-root", "", "testing only: read/write a fake /sys tree under this prefix")
 	catalog := fs.String("catalog", daemon.DefaultCatalog, "root-owned agent catalog override (optional)")
 	owners := fs.String("owner", "", "comma-separated users/uids allowed to read status (e.g. alice)")
 	if err := fs.Parse(args); err != nil {
@@ -124,6 +140,7 @@ func cliDaemon(args []string, socket string, stderr io.Writer) int {
 		CatalogOverride: *catalog,
 		Owners:          uids,
 		Version:         dsVersion,
+		SysRoot:         *sysRoot,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "devshield daemon: %v\n", err)
@@ -252,6 +269,88 @@ func cliVerify(path string, stdout, stderr io.Writer) int {
 		return 3
 	}
 	fmt.Fprintf(stdout, "%s: intact, %d records\n", path, n)
+	return 0
+}
+
+func cliSensors(args []string, stdout io.Writer) int {
+	snap := sensors.Read(os.Getenv("DEVSHIELD_SYS_ROOT")) // env override only for testing
+	if len(args) > 0 && args[0] == "--json" {
+		b, _ := json.MarshalIndent(snap, "", "  ")
+		fmt.Fprintln(stdout, string(b))
+		return 0
+	}
+	if snap.Summary.Source == "none" {
+		fmt.Fprintln(stdout, "No hardware sensors exposed by this kernel (common in VMs and containers).")
+		return 0
+	}
+	sm := snap.Summary
+	fmt.Fprintf(stdout, "CPU %s   GPU %s   NVMe %s   Fan %s   (source: %s)\n\n",
+		orUnknown(sm.CPUTempC, "°C"), orUnknown(sm.GPUTempC, "°C"), orUnknown(sm.NVMeTempC, "°C"), orUnknown(sm.MaxFanRPM, " RPM"), sm.Source)
+	for _, r := range snap.Readings {
+		crit := ""
+		if r.Crit > 0 {
+			crit = fmt.Sprintf("  (critical %.0f%s)", r.Crit, r.Unit)
+		}
+		fmt.Fprintf(stdout, "  %-14s %-18s %8.1f %s%s\n", r.Chip, truncate(r.Label, 18), r.Value, r.Unit, crit)
+	}
+	return 0
+}
+
+func orUnknown(v float64, unit string) string {
+	if v == 0 {
+		return "—"
+	}
+	return fmt.Sprintf("%.0f%s", v, unit)
+}
+
+func printThermal(t *ipc.Thermal, stdout io.Writer) {
+	active := t.Active
+	if active == "" {
+		active = "none (original settings)"
+	}
+	fmt.Fprintf(stdout, "Active profile: %s\n", active)
+	fmt.Fprintf(stdout, "CPU %s   GPU %s   Fan %s\n", orUnknown(t.CPUTempC, "°C"), orUnknown(t.GPUTempC, "°C"), orUnknown(t.MaxFanRPM, " RPM"))
+	if !t.Supported {
+		fmt.Fprintln(stdout, "This machine exposes no thermal controls DevShield can change.")
+	} else {
+		fmt.Fprintf(stdout, "Controls: %s\n", strings.Join(t.Controls, "; "))
+	}
+	for _, a := range t.Applied {
+		fmt.Fprintf(stdout, "  ✅ %s\n", a)
+	}
+	for _, s := range t.Skipped {
+		fmt.Fprintf(stdout, "  ⏭  skipped (system refused): %s\n", s)
+	}
+	for _, m := range t.Mismatch {
+		fmt.Fprintf(stdout, "  ⚠  %s\n", m)
+	}
+	for _, n := range t.Notes {
+		fmt.Fprintf(stdout, "  ·  %s\n", n)
+	}
+}
+
+func cliThermal(socket string, stdout, stderr io.Writer) int {
+	resp, ok := call(socket, ipc.Request{Op: "thermal"}, stderr)
+	if !ok {
+		return 1
+	}
+	printThermal(resp.Thermal, stdout)
+	fmt.Fprintln(stdout, "\nChange it with: sudo devshield profile silent|gaming|dev|off")
+	return 0
+}
+
+func cliProfile(name, socket string, stdout, stderr io.Writer) int {
+	resp, ok := call(socket, ipc.Request{Op: "profile", Profile: name}, stderr)
+	if !ok {
+		if resp.Thermal != nil {
+			printThermal(resp.Thermal, stderr)
+		}
+		return 1
+	}
+	printThermal(resp.Thermal, stdout)
+	if len(resp.Thermal.Mismatch) > 0 {
+		return 3
+	}
 	return 0
 }
 

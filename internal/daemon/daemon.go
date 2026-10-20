@@ -6,8 +6,9 @@
 // Clients (CLI, tray) talk to it over internal/ipc. The kernel tells the
 // daemon who is calling; the rules are:
 //
-//	read  (status, agents, events, verify)  root or a configured owner uid
-//	write (sanction, revoke)                root only — i.e. the owner via sudo
+//	read  (status, agents, events, verify,  root or a configured owner uid
+//	       thermal)
+//	write (sanction, revoke, profile)       root only — i.e. the owner via sudo
 //
 // A non-root process trying to change policy is recorded as
 // AGENT_TAMPER_ATTEMPT, naming the program that tried.
@@ -28,6 +29,8 @@ import (
 	"github.com/chinmaykx07/DevShield_Windows/internal/agentwatch"
 	"github.com/chinmaykx07/DevShield_Windows/internal/auditlog"
 	"github.com/chinmaykx07/DevShield_Windows/internal/ipc"
+	"github.com/chinmaykx07/DevShield_Windows/internal/sensors"
+	"github.com/chinmaykx07/DevShield_Windows/internal/thermal"
 
 	_ "modernc.org/sqlite"
 )
@@ -45,10 +48,11 @@ type Config struct {
 	CatalogOverride string // optional root-owned catalog override
 	Owners          []int  // non-root uids allowed to READ status/agents/events
 	Version         string
+	SysRoot         string // filesystem prefix for /sys ("" = real system; tests use a fake tree)
 }
 
-var readOps = map[string]bool{"status": true, "agents": true, "events": true, "verify": true}
-var writeOps = map[string]bool{"sanction": true, "revoke": true}
+var readOps = map[string]bool{"status": true, "agents": true, "events": true, "verify": true, "thermal": true}
+var writeOps = map[string]bool{"sanction": true, "revoke": true, "profile": true}
 
 // authorize decides whether peer may run op. tamper is true when a
 // non-root process attempted a policy change — worth an alert of its own.
@@ -276,8 +280,69 @@ func (d *Daemon) handle(peer ipc.Peer, req ipc.Request) ipc.Response {
 		}
 		d.event("OWNER_ACTION", fmt.Sprintf("%s %s by %s", req.Op, req.ID, peer), "ok")
 		return ipc.Response{OK: true}
+	case "thermal":
+		return ipc.Response{OK: true, Thermal: d.thermalStatus()}
+	case "profile":
+		return d.applyProfile(req.Profile, peer)
 	}
 	return ipc.Response{Error: "unknown operation"}
+}
+
+func (d *Daemon) thermalDir() string { return filepath.Join(d.cfg.StateDir, "thermal") }
+
+func (d *Daemon) thermalStatus() *ipc.Thermal {
+	c := thermal.Detect(d.cfg.SysRoot)
+	t := &ipc.Thermal{Supported: c.Supported(), Active: thermal.Active(d.thermalDir())}
+	if c.BoostPath != "" || anyBoost(c) {
+		t.Controls = append(t.Controls, "CPU boost")
+	}
+	if len(c.Policies) > 0 {
+		t.Controls = append(t.Controls, fmt.Sprintf("max CPU frequency (%d policies)", len(c.Policies)))
+	}
+	if len(c.Policies) > 0 && c.Policies[0].HasEPP {
+		t.Controls = append(t.Controls, "energy/performance preference")
+	}
+	if c.PlatformProfile {
+		t.Controls = append(t.Controls, "platform profile: "+strings.Join(c.PlatformChoices, " "))
+	}
+	s := sensors.Read(d.cfg.SysRoot).Summary
+	t.CPUTempC, t.GPUTempC, t.MaxFanRPM = s.CPUTempC, s.GPUTempC, s.MaxFanRPM
+	return t
+}
+
+func anyBoost(c thermal.Caps) bool {
+	for _, p := range c.Policies {
+		if p.HasBoost {
+			return true
+		}
+	}
+	return false
+}
+
+func (d *Daemon) applyProfile(profile string, peer ipc.Peer) ipc.Response {
+	if profile == "off" {
+		failed, err := thermal.Off(d.thermalDir())
+		if err != nil {
+			d.event("THERMAL_RESTORE_FAILED", fmt.Sprintf("%v %v by %s", err, failed, peer), "fail")
+			return ipc.Response{Error: err.Error(), Thermal: &ipc.Thermal{Notes: failed}}
+		}
+		d.event("THERMAL_RESTORED", "original thermal settings restored by "+peer.String(), "ok")
+		return ipc.Response{OK: true, Thermal: d.thermalStatus()}
+	}
+	res, err := thermal.Apply(thermal.Detect(d.cfg.SysRoot), profile, d.thermalDir())
+	if err != nil {
+		d.event("THERMAL_PROFILE_FAILED", fmt.Sprintf("%s: %v (by %s)", profile, err, peer), "fail")
+		return ipc.Response{Error: err.Error()}
+	}
+	status := "ok"
+	if len(res.Mismatch) > 0 {
+		status = "warn"
+	}
+	d.event("THERMAL_PROFILE_APPLIED", fmt.Sprintf("%s by %s: %d applied, %d skipped, %d mismatched",
+		profile, peer, len(res.Applied), len(res.Skipped), len(res.Mismatch)), status)
+	t := d.thermalStatus()
+	t.Applied, t.Skipped, t.Mismatch, t.Notes = res.Applied, res.Skipped, res.Mismatch, res.Notes
+	return ipc.Response{OK: true, Thermal: t}
 }
 
 func (d *Daemon) status() *ipc.Status {

@@ -26,7 +26,8 @@ UMask=0077
 # ── Hardening ───────────────────────────────────────────────────────────
 # Only what Agent Watch needs: read every process's environment, loaded
 # libraries and executable (CAP_SYS_PTRACE), and read users' autostart
-# files (CAP_DAC_READ_SEARCH). Later phases (firewall, cpufreq) will add
+# files (CAP_DAC_READ_SEARCH). Thermal profiles write root-owned files in
+# /sys, which needs no extra capability. Later phases (firewall) will add
 # exactly the capabilities they need, nothing more.
 CapabilityBoundingSet=CAP_SYS_PTRACE CAP_DAC_READ_SEARCH
 NoNewPrivileges=yes
@@ -34,7 +35,10 @@ ProtectSystem=strict
 ProtectHome=read-only
 # No PrivateTmp: rogue agents often live in /tmp, and the daemon must see
 # (and hash) the real files there.
-ProtectKernelTunables=yes
+# ProtectKernelTunables is deliberately NOT set: it makes /sys read-only,
+# and thermal profiles must write /sys/devices/system/cpu/cpufreq and
+# /sys/firmware/acpi/platform_profile. ProtectSystem=strict leaves /sys
+# writable while keeping the rest of the OS read-only.
 ProtectKernelModules=yes
 ProtectKernelLogs=yes
 ProtectControlGroups=yes

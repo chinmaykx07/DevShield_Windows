@@ -22,6 +22,13 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   (SO_PEERCRED). Policy changes require root, so an agent cannot sanction
   itself; attempts are logged as AGENT_TAMPER_ATTEMPT. Hardened systemd
   unit in `packaging/linux/` (not yet tested under systemd).
+- Linux sensors (`devshield sensors`) from the kernel's hwmon/thermal zones,
+  replacing the need for LibreHardwareMonitor on Linux.
+- Linux thermal profiles (`sudo devshield profile silent|gaming|dev|off`)
+  via cpufreq, boost, energy-performance preference and ACPI
+  platform_profile, with an original-state baseline, all-or-nothing apply,
+  read-back verification and exact restore. Root-only, audit-logged.
+  Tested on simulated sysfs; not yet on real hardware.
 - Tamper-evident, hash-chained audit log: edits, deletions, reordering and
   truncation are detected; unclean daemon stops are reported.
 

@@ -177,3 +177,54 @@ func TestUncleanStopAndTamperAreReportedOnNextStart(t *testing.T) {
 		t.Fatal("status should report tampering detected this run")
 	}
 }
+
+func TestThermalProfileThroughDaemon(t *testing.T) {
+	sys := t.TempDir()
+	for rel, v := range map[string]string{
+		"sys/devices/system/cpu/cpufreq/boost":                    "1",
+		"sys/devices/system/cpu/cpufreq/policy0/cpuinfo_min_freq": "400000",
+		"sys/devices/system/cpu/cpufreq/policy0/cpuinfo_max_freq": "4000000",
+		"sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq": "4000000",
+	} {
+		p := filepath.Join(sys, rel)
+		os.MkdirAll(filepath.Dir(p), 0o755)
+		os.WriteFile(p, []byte(v+"\n"), 0o644)
+	}
+	d, err := start(Config{StateDir: filepath.Join(t.TempDir(), "state"), Owners: []int{1000}, Version: "test", SysRoot: sys})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.close()
+	readSys := func(rel string) string {
+		b, _ := os.ReadFile(filepath.Join(sys, rel))
+		return strings.TrimSpace(string(b))
+	}
+
+	// The owner can read thermal status but not change the profile.
+	if r := d.handle(ipc.Peer{UID: 1000}, ipc.Request{Op: "thermal"}); !r.OK || !r.Thermal.Supported {
+		t.Fatalf("owner thermal read: %+v", r)
+	}
+	if r := d.handle(ipc.Peer{UID: 1000, Exe: "/usr/bin/python3"}, ipc.Request{Op: "profile", Profile: "gaming"}); r.OK {
+		t.Fatal("non-root profile change must be refused")
+	}
+	if !strings.Contains(strings.Join(lastActions(t, d, 1), ""), "AGENT_TAMPER_ATTEMPT") {
+		t.Fatal("non-root profile change not logged as tamper attempt")
+	}
+
+	r := d.handle(ipc.Peer{UID: 0}, ipc.Request{Op: "profile", Profile: "silent"})
+	if !r.OK || r.Thermal.Active != "silent" || readSys("sys/devices/system/cpu/cpufreq/boost") != "0" ||
+		readSys("sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq") != "2800000" {
+		t.Fatalf("silent via daemon: %+v", r)
+	}
+	r = d.handle(ipc.Peer{UID: 0}, ipc.Request{Op: "profile", Profile: "off"})
+	if !r.OK || readSys("sys/devices/system/cpu/cpufreq/boost") != "1" || readSys("sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq") != "4000000" {
+		t.Fatalf("off via daemon: %+v", r)
+	}
+	got := strings.Join(lastActions(t, d, 3), "\n")
+	if !strings.Contains(got, "THERMAL_PROFILE_APPLIED") || !strings.Contains(got, "THERMAL_RESTORED") {
+		t.Fatalf("thermal changes not in the audit log:\n%s", got)
+	}
+	if fi, _ := os.Stat(d.thermalDir()); fi.Mode().Perm() != 0o700 {
+		t.Fatalf("thermal state dir mode %v", fi.Mode().Perm())
+	}
+}

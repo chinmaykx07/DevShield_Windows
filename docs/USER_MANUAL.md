@@ -140,6 +140,24 @@ sudo devshield verify-log        # check the audit log's hash chain
 - **The audit log is hash-chained.** Editing, deleting, reordering or truncating records is detected and reported with the exact line. Tampering found at start-up is logged as `AUDIT_TAMPER_DETECTED`. A daemon that was killed, rather than stopped cleanly, shows up as `DAEMON_UNCLEAN_STOP` on its next start.
 - **Exit codes for scripts and monitoring:** `status` and `agents` exit with **3** when a rogue or risky agent is running or the log is tampered with.
 
+**Sensors and thermal profiles (Linux):**
+
+```bash
+devshield sensors                  # CPU/GPU/NVMe temperatures, fans, power, read straight from the kernel
+devshield profile                  # what this machine can control, active profile, temperatures
+sudo devshield profile silent      # boost off, 2800 MHz cap, energy-saving preference, quiet/low-power fan mode
+sudo devshield profile gaming      # boost on, full frequency, performance preference/fan mode
+sudo devshield profile dev         # boost on, 90% max frequency, balanced
+sudo devshield profile off         # restore the original settings exactly
+```
+
+These use standard kernel interfaces (cpufreq, intel_pstate/amd-pstate boost, energy-performance preference, ACPI `platform_profile`), with no vendor tools or downloads.
+- **Backup first.** Before DevShield's first change, the original values are saved in the root-only state directory.
+- **All or nothing.** If a required change fails midway, everything from that attempt is undone.
+- **Checked afterwards.** Every value is read back to confirm it took.
+
+What a profile can do depends on the hardware. `devshield profile` lists the controls this machine actually has.
+
 **Install, by hand for now** (packages come later):
 
 ```bash
@@ -149,7 +167,7 @@ echo "DEVSHIELD_OWNER=$USER" | sudo install -D -m 0644 /dev/stdin /etc/devshield
 sudo systemctl daemon-reload && sudo systemctl enable --now devshield
 ```
 
-Status: tested by unit tests and a live run with real users on Linux (owner/other user, a rogue attempting self-sanction, `kill -9`, log tampering). **Not yet tested under systemd itself**, so the unit's hardening settings still need a real-machine check. Thermal, privacy, firewall and the tray on Linux come next.
+Status: tested by unit tests and a live run with real users on Linux (owner/other user, a rogue attempting self-sanction, `kill -9`, log tampering). **Not yet tested under systemd itself**, so the unit's hardening settings still need a real-machine check. Sensors and thermal profiles are tested on simulated kernel layouts (Intel/AMD, laptop and desktop) and through the real daemon socket, but **not yet on real hardware**. Privacy, firewall and the tray on Linux come next.
 
 ## 3. Pro Use
 

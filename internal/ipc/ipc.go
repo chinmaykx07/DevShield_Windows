@@ -31,9 +31,10 @@ const (
 
 // Request is what a client asks for.
 type Request struct {
-	Op    string `json:"op"`              // status | agents | events | verify | sanction | revoke
-	ID    string `json:"id,omitempty"`    // agent id for sanction/revoke
-	Limit int    `json:"limit,omitempty"` // for events
+	Op      string `json:"op"`                // status | agents | events | verify | sanction | revoke | thermal | profile
+	ID      string `json:"id,omitempty"`      // agent id for sanction/revoke
+	Limit   int    `json:"limit,omitempty"`   // for events
+	Profile string `json:"profile,omitempty"` // silent | gaming | dev | off, for profile
 }
 
 // Agent is the client-facing view of one running agent.
@@ -65,13 +66,29 @@ type Status struct {
 	TamperSince bool   `json:"tamper_detected_this_run"`
 }
 
+// Thermal describes thermal controls and state.
+type Thermal struct {
+	Supported bool     `json:"supported"`
+	Active    string   `json:"active"`   // profile DevShield applied, "" = original settings
+	Controls  []string `json:"controls"` // what this machine lets DevShield change
+	CPUTempC  float64  `json:"cpu_temp_c"`
+	GPUTempC  float64  `json:"gpu_temp_c"`
+	MaxFanRPM float64  `json:"max_fan_rpm"`
+	// Result of a profile change
+	Applied  []string `json:"applied,omitempty"`
+	Skipped  []string `json:"skipped,omitempty"`
+	Mismatch []string `json:"mismatch,omitempty"`
+	Notes    []string `json:"notes,omitempty"`
+}
+
 // Response is the daemon's answer.
 type Response struct {
-	OK     bool              `json:"ok"`
-	Error  string            `json:"error,omitempty"`
-	Status *Status           `json:"status,omitempty"`
-	Agents []Agent           `json:"agents,omitempty"`
-	Events []auditlog.Record `json:"events,omitempty"`
+	OK      bool              `json:"ok"`
+	Error   string            `json:"error,omitempty"`
+	Status  *Status           `json:"status,omitempty"`
+	Agents  []Agent           `json:"agents,omitempty"`
+	Events  []auditlog.Record `json:"events,omitempty"`
+	Thermal *Thermal          `json:"thermal,omitempty"`
 }
 
 // Peer identifies the process on the other end, as reported by the kernel.
