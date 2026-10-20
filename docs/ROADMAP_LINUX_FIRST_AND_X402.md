@@ -17,7 +17,7 @@ Status: proposal. The decisions in section 7 are needed before the restructuring
 
 | Area | State |
 |---|---|
-| Go tray core | Builds and vets for Windows and Linux. 23 unit tests. Quit deadlock fixed. |
+| Go tray core | Builds and vets for Windows and Linux. 21 unit tests. Quit deadlock fixed. |
 | Agent Watch (AI/rogue agents) | Built behaviour-first. Tested on Linux, live rogue test passes. **Not run on Windows.** |
 | PowerShell features (profiles, privacy, Tor, guardian, rollback, dashboard) | **Windows-only and largely non-functional as wired.** Tasks never register, prompts block, rollback restores nothing, the guardian crashes, the Tor kill-switch blocks nothing. See the review notes. |
 | Linux support | Agent Watch collectors only. Everything else is Windows-specific. |
