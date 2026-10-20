@@ -1,10 +1,13 @@
 module github.com/chinmaykx07/DevShield_Windows
 
-go 1.22
+go 1.26
+
+toolchain go1.27.3
 
 require (
 	fyne.io/systray v1.11.0
 	github.com/shirou/gopsutil/v3 v3.24.5
+	golang.org/x/sys v0.44.0
 	modernc.org/sqlite v1.31.1
 )
 
@@ -23,7 +26,6 @@ require (
 	github.com/tklauser/go-sysconf v0.3.13 // indirect
 	github.com/tklauser/numcpus v0.7.0 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
-	golang.org/x/sys v0.22.0 // indirect
 	modernc.org/gc/v3 v3.0.0-20240107210532-573471604cb6 // indirect
 	modernc.org/libc v1.55.3 // indirect
 	modernc.org/mathutil v1.6.0 // indirect

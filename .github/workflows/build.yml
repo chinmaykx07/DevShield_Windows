@@ -11,6 +11,9 @@ on:
   pull_request:
     branches:
       - main
+  push:
+    branches:
+      - main
 
 # Permissions required for:
 #   contents: write      → create GitHub Release + upload assets
@@ -22,7 +25,30 @@ permissions:
   attestations: write
 
 jobs:
+  # ── Verify on every push/PR: vet, race tests, known vulnerabilities ──
+  verify:
+    name: Verify (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod   # honours the toolchain line (patched Go)
+          cache: true
+      - name: go vet
+        run: go vet ./...
+      - name: Tests with race detector
+        run: go test -race -count=1 ./...
+      - name: govulncheck (fails on reachable vulnerabilities)
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
   build:
+    needs: verify
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'pull_request'
     name: Build DevShield Windows Binary
     runs-on: windows-latest
 
@@ -35,10 +61,10 @@ jobs:
           fetch-depth: 0   # full history for version tags
 
       # ── 2. Go toolchain ───────────────────────────────────────
-      - name: Set up Go 1.22
+      - name: Set up Go (version from go.mod toolchain line)
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version-file: go.mod
           cache: true       # cache go module downloads between runs
 
       # ── 3. TDM-GCC (required for CGO — fyne-io/systray) ──────
