@@ -11,6 +11,7 @@
 //	devshield sensors [--json]     temperatures, fans, power (no daemon needed)
 //	devshield profile              thermal controls, active profile, temps
 //	sudo devshield profile <name>  silent | gaming | dev | off (root only)
+//	devshield sinkhole [on|off]    telemetry sinkhole in /etc/hosts (changes need root)
 
 package main
 
@@ -48,6 +49,8 @@ Usage:
   devshield sensors [--json]      temperatures, fans and power (no daemon needed)
   devshield profile               thermal controls, active profile and temperatures
   sudo devshield profile <name>   silent | gaming | dev | off (off = original settings)
+  devshield sinkhole              telemetry sinkhole status and what it blocks
+  sudo devshield sinkhole on|off  block / unblock telemetry domains in /etc/hosts
   devshield version
 
 Global flag (before or after the command): --socket PATH (default ` + ipc.DefaultSocket + `)
@@ -104,6 +107,20 @@ func runCLI(args []string, stdout, stderr io.Writer) int {
 			return cliThermal(socket, stdout, stderr)
 		}
 		return cliProfile(cargs[0], socket, stdout, stderr)
+	case "sinkhole":
+		op, mode := "privacy", ""
+		if len(cargs) > 0 {
+			op, mode = "sinkhole", cargs[0]
+		}
+		resp, ok := call(socket, ipc.Request{Op: op, Profile: mode}, stderr)
+		if !ok {
+			return 1
+		}
+		printSinkhole(resp.Sinkhole, stdout)
+		if len(resp.Sinkhole.Missing) > 0 || !resp.Sinkhole.FilesInNSS {
+			return 3
+		}
+		return 0
 	case "verify-log":
 		path := daemon.DefaultStateDir + "/audit.log"
 		if len(cargs) > 0 {
@@ -119,7 +136,8 @@ func cliDaemon(args []string, socket string, stderr io.Writer) int {
 	fs := flag.NewFlagSet("daemon", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	stateDir := fs.String("state-dir", daemon.DefaultStateDir, "root-only state directory")
-	sysRoot := fs.String("sys-root", "", "testing only: read/write a fake /sys tree under this prefix")
+	sysRoot := fs.String("sys-root", "", "testing only: read/write a fake /sys and /etc tree under this prefix")
+	hostList := fs.String("hosts-list", daemon.DefaultHostList, "root-owned sinkhole list override (optional)")
 	catalog := fs.String("catalog", daemon.DefaultCatalog, "root-owned agent catalog override (optional)")
 	owners := fs.String("owner", "", "comma-separated users/uids allowed to read status (e.g. alice)")
 	if err := fs.Parse(args); err != nil {
@@ -135,12 +153,13 @@ func cliDaemon(args []string, socket string, stderr io.Writer) int {
 	defer stop()
 
 	err = daemon.Run(ctx, daemon.Config{
-		StateDir:        *stateDir,
-		Socket:          socket,
-		CatalogOverride: *catalog,
-		Owners:          uids,
-		Version:         dsVersion,
-		SysRoot:         *sysRoot,
+		StateDir:         *stateDir,
+		Socket:           socket,
+		CatalogOverride:  *catalog,
+		Owners:           uids,
+		Version:          dsVersion,
+		SysRoot:          *sysRoot,
+		HostListOverride: *hostList,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "devshield daemon: %v\n", err)
@@ -352,6 +371,23 @@ func cliProfile(name, socket string, stdout, stderr io.Writer) int {
 		return 3
 	}
 	return 0
+}
+
+func printSinkhole(s *ipc.Sinkhole, stdout io.Writer) {
+	if s.Active {
+		fmt.Fprintf(stdout, "Telemetry sinkhole: ON — %d domains blocked in /etc/hosts (list %s)\n", s.Blocked, s.ListVersion)
+	} else {
+		fmt.Fprintf(stdout, "Telemetry sinkhole: off (list %s has %d domains)\n", s.ListVersion, s.Expected)
+	}
+	for _, g := range s.Groups {
+		fmt.Fprintf(stdout, "  · %s\n", g)
+	}
+	for _, m := range s.Missing {
+		fmt.Fprintf(stdout, "  ⚠ in the list but missing from /etc/hosts: %s\n", m)
+	}
+	for _, w := range s.Warnings {
+		fmt.Fprintf(stdout, "  note: %s\n", w)
+	}
 }
 
 func truncate(s string, n int) string {

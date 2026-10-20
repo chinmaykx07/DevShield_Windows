@@ -132,7 +132,8 @@ It was started by Coinbase and is now governed by an x402 foundation. It has Go 
 - ✅ Hardened systemd unit (`packaging/linux/devshield.service`). Not yet run under systemd.
 - ✅ Sensors from hwmon/thermal zones (`internal/sensors`, `devshield sensors`): no download, no root.
 - ✅ Thermal profiles via cpufreq/boost/EPP/platform_profile (`internal/thermal`, `sudo devshield profile …`), with a pre-change baseline, all-or-nothing apply, read-back verification and exact restore. Tested on simulated sysfs layouts and through the daemon. **Not yet on real hardware.**
-- ⏭ Next: hosts sinkhole (with the same baseline/restore model) → nftables kill-switch → Linux tray → .deb/.rpm.
+- ✅ Telemetry sinkhole (`internal/hosts`, `devshield sinkhole on|off`): managed block only, user entries preserved, whole-list re-apply (fixes the Windows drop bug), honest status. Verified live on a real resolver.
+- ⏭ Next: nftables kill-switch (a real one: per-program egress block) → Linux tray → .deb/.rpm.
 
 ### Revised phases
 - **Phase L (Linux, full parity):** root helper (systemd) · sensors (hwmon) · thermal (cpufreq/boost) · hosts sinkhole · nftables kill-switch + LLMNR/MAC · network monitor · rollback in Go with tests · Agent Watch · daemon + CLI + tray · .deb/.rpm packaging · CI on Linux.

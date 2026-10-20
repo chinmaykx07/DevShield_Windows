@@ -7,8 +7,9 @@
 // daemon who is calling; the rules are:
 //
 //	read  (status, agents, events, verify,  root or a configured owner uid
-//	       thermal)
-//	write (sanction, revoke, profile)       root only — i.e. the owner via sudo
+//	       thermal, privacy)
+//	write (sanction, revoke, profile,       root only — i.e. the owner via sudo
+//	       sinkhole)
 //
 // A non-root process trying to change policy is recorded as
 // AGENT_TAMPER_ATTEMPT, naming the program that tried.
@@ -28,6 +29,7 @@ import (
 
 	"github.com/chinmaykx07/DevShield_Windows/internal/agentwatch"
 	"github.com/chinmaykx07/DevShield_Windows/internal/auditlog"
+	"github.com/chinmaykx07/DevShield_Windows/internal/hosts"
 	"github.com/chinmaykx07/DevShield_Windows/internal/ipc"
 	"github.com/chinmaykx07/DevShield_Windows/internal/sensors"
 	"github.com/chinmaykx07/DevShield_Windows/internal/thermal"
@@ -39,20 +41,22 @@ import (
 const (
 	DefaultStateDir = "/var/lib/devshield"
 	DefaultCatalog  = "/etc/devshield/agent_catalog.json"
+	DefaultHostList = "/etc/devshield/hosts_blocklist.json"
 )
 
 // Config for one daemon run.
 type Config struct {
-	StateDir        string // root-only directory for the database and audit log
-	Socket          string // ipc socket path
-	CatalogOverride string // optional root-owned catalog override
-	Owners          []int  // non-root uids allowed to READ status/agents/events
-	Version         string
-	SysRoot         string // filesystem prefix for /sys ("" = real system; tests use a fake tree)
+	StateDir         string // root-only directory for the database and audit log
+	Socket           string // ipc socket path
+	CatalogOverride  string // optional root-owned catalog override
+	Owners           []int  // non-root uids allowed to READ status/agents/events
+	Version          string
+	SysRoot          string // filesystem prefix for /sys and /etc ("" = real system; tests use a fake tree)
+	HostListOverride string // optional root-owned sinkhole list
 }
 
-var readOps = map[string]bool{"status": true, "agents": true, "events": true, "verify": true, "thermal": true}
-var writeOps = map[string]bool{"sanction": true, "revoke": true, "profile": true}
+var readOps = map[string]bool{"status": true, "agents": true, "events": true, "verify": true, "thermal": true, "privacy": true}
+var writeOps = map[string]bool{"sanction": true, "revoke": true, "profile": true, "sinkhole": true}
 
 // authorize decides whether peer may run op. tamper is true when a
 // non-root process attempted a policy change — worth an alert of its own.
@@ -284,6 +288,10 @@ func (d *Daemon) handle(peer ipc.Peer, req ipc.Request) ipc.Response {
 		return ipc.Response{OK: true, Thermal: d.thermalStatus()}
 	case "profile":
 		return d.applyProfile(req.Profile, peer)
+	case "privacy":
+		return d.sinkholeStatus()
+	case "sinkhole":
+		return d.setSinkhole(req.Profile, peer)
 	}
 	return ipc.Response{Error: "unknown operation"}
 }
@@ -396,4 +404,48 @@ func ParseOwners(spec string, lookup func(string) (int, error)) ([]int, error) {
 		out = append(out, uid)
 	}
 	return out, nil
+}
+
+func (d *Daemon) sinkholeStatus() ipc.Response {
+	l, err := hosts.LoadList(d.cfg.HostListOverride)
+	if err != nil {
+		return ipc.Response{Error: err.Error()}
+	}
+	st := hosts.Check(d.cfg.SysRoot, l)
+	out := &ipc.Sinkhole{
+		Active: st.Active, Blocked: st.Blocked, Expected: st.Expected, Missing: st.Missing,
+		FilesInNSS: st.FilesInNSS, Warnings: st.Warnings, ListVersion: st.ListVersion,
+	}
+	for _, g := range l.Groups {
+		out.Groups = append(out.Groups, fmt.Sprintf("%s (%d): %s", g.Name, len(g.Domains), g.Why))
+	}
+	return ipc.Response{OK: true, Sinkhole: out}
+}
+
+func (d *Daemon) setSinkhole(mode string, peer ipc.Peer) ipc.Response {
+	switch mode {
+	case "on":
+		l, err := hosts.LoadList(d.cfg.HostListOverride)
+		if err != nil {
+			return ipc.Response{Error: err.Error()}
+		}
+		n, err := hosts.Apply(d.cfg.SysRoot, filepath.Join(d.cfg.StateDir, "privacy"), l)
+		if err != nil {
+			d.event("SINKHOLE_FAILED", fmt.Sprintf("%v (by %s)", err, peer), "fail")
+			return ipc.Response{Error: err.Error()}
+		}
+		d.event("SINKHOLE_APPLIED", fmt.Sprintf("%d domains, list %s, by %s", n, l.Version, peer), "ok")
+	case "off":
+		removed, err := hosts.Off(d.cfg.SysRoot)
+		if err != nil {
+			d.event("SINKHOLE_FAILED", fmt.Sprintf("off: %v (by %s)", err, peer), "fail")
+			return ipc.Response{Error: err.Error()}
+		}
+		if removed {
+			d.event("SINKHOLE_REMOVED", "managed block removed by "+peer.String(), "ok")
+		}
+	default:
+		return ipc.Response{Error: "sinkhole takes on or off"}
+	}
+	return d.sinkholeStatus()
 }

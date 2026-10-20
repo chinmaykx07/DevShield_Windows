@@ -158,6 +158,18 @@ These use standard kernel interfaces (cpufreq, intel_pstate/amd-pstate boost, en
 
 What a profile can do depends on the hardware. `devshield profile` lists the controls this machine actually has.
 
+**Telemetry sinkhole (Linux):**
+
+```bash
+devshield sinkhole               # status: on/off, what is blocked and why
+sudo devshield sinkhole on       # add DevShield's managed block to /etc/hosts
+sudo devshield sinkhole off      # remove only that block
+```
+
+The list is deliberately small and documented, so every entry is a pure telemetry endpoint: Ubuntu usage reporting, VS Code/.NET telemetry, Next.js telemetry. Update servers are on a never-block list. Root can supply its own list in `/etc/devshield/hosts_blocklist.json`.
+- **Your entries are safe.** Your own lines in `/etc/hosts` are never touched, and `off` removes only DevShield's block, keeping edits you made since. A one-time copy of the original file is kept in the root-only state directory.
+- **Status warns you** if the sinkhole can't work: name resolution that ignores `/etc/hosts`, or entries removed by hand. Browsers using DNS-over-HTTPS bypass hosts-file blocking.
+
 **Install, by hand for now** (packages come later):
 
 ```bash
@@ -167,7 +179,7 @@ echo "DEVSHIELD_OWNER=$USER" | sudo install -D -m 0644 /dev/stdin /etc/devshield
 sudo systemctl daemon-reload && sudo systemctl enable --now devshield
 ```
 
-Status: tested by unit tests and a live run with real users on Linux (owner/other user, a rogue attempting self-sanction, `kill -9`, log tampering). **Not yet tested under systemd itself**, so the unit's hardening settings still need a real-machine check. Sensors and thermal profiles are tested on simulated kernel layouts (Intel/AMD, laptop and desktop) and through the real daemon socket, but **not yet on real hardware**. Privacy, firewall and the tray on Linux come next.
+Status: tested by unit tests and a live run with real users on Linux (owner/other user, a rogue attempting self-sanction, `kill -9`, log tampering). **Not yet tested under systemd itself**, so the unit's hardening settings still need a real-machine check. The sinkhole was tested live on a real Linux system: the resolver returned 0.0.0.0 for blocked domains, update servers kept resolving, and `/etc/hosts` came back byte-for-byte identical after `off`. Sensors and thermal profiles are tested on simulated kernel layouts (Intel/AMD, laptop and desktop) and through the real daemon socket, but **not yet on real hardware**. Privacy, firewall and the tray on Linux come next.
 
 ## 3. Pro Use
 

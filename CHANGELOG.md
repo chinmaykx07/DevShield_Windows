@@ -29,6 +29,11 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   platform_profile, with an original-state baseline, all-or-nothing apply,
   read-back verification and exact restore. Root-only, audit-logged.
   Tested on simulated sysfs; not yet on real hardware.
+- Linux telemetry sinkhole (`sudo devshield sinkhole on|off`): managed
+  /etc/hosts block with a small documented list and a never-block list;
+  user entries preserved; re-apply always writes the full list; status
+  flags missing entries and resolvers that ignore /etc/hosts. Verified
+  live on a real resolver.
 - Tamper-evident, hash-chained audit log: edits, deletions, reordering and
   truncation are detected; unclean daemon stops are reported.
 

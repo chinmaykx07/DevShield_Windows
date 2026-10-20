@@ -34,7 +34,7 @@ type Request struct {
 	Op      string `json:"op"`                // status | agents | events | verify | sanction | revoke | thermal | profile
 	ID      string `json:"id,omitempty"`      // agent id for sanction/revoke
 	Limit   int    `json:"limit,omitempty"`   // for events
-	Profile string `json:"profile,omitempty"` // silent | gaming | dev | off, for profile
+	Profile string `json:"profile,omitempty"` // silent|gaming|dev|off for profile; on|off for sinkhole
 }
 
 // Agent is the client-facing view of one running agent.
@@ -81,14 +81,27 @@ type Thermal struct {
 	Notes    []string `json:"notes,omitempty"`
 }
 
+// Sinkhole describes the /etc/hosts telemetry sinkhole.
+type Sinkhole struct {
+	Active      bool     `json:"active"`
+	Blocked     int      `json:"blocked"`
+	Expected    int      `json:"expected"`
+	Missing     []string `json:"missing,omitempty"`
+	FilesInNSS  bool     `json:"files_in_nss"`
+	Warnings    []string `json:"warnings,omitempty"`
+	ListVersion string   `json:"list_version"`
+	Groups      []string `json:"groups,omitempty"`
+}
+
 // Response is the daemon's answer.
 type Response struct {
-	OK      bool              `json:"ok"`
-	Error   string            `json:"error,omitempty"`
-	Status  *Status           `json:"status,omitempty"`
-	Agents  []Agent           `json:"agents,omitempty"`
-	Events  []auditlog.Record `json:"events,omitempty"`
-	Thermal *Thermal          `json:"thermal,omitempty"`
+	OK       bool              `json:"ok"`
+	Error    string            `json:"error,omitempty"`
+	Status   *Status           `json:"status,omitempty"`
+	Agents   []Agent           `json:"agents,omitempty"`
+	Events   []auditlog.Record `json:"events,omitempty"`
+	Thermal  *Thermal          `json:"thermal,omitempty"`
+	Sinkhole *Sinkhole         `json:"sinkhole,omitempty"`
 }
 
 // Peer identifies the process on the other end, as reported by the kernel.

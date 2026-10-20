@@ -1,0 +1,20 @@
+{
+  "version": "2026-10-20",
+  "note": "Telemetry endpoints DevShield's Linux sinkhole blocks via /etc/hosts. Kept small and documented on purpose: every entry should be a pure telemetry/analytics endpoint whose blocking breaks nothing a user needs. Root may replace this list with /etc/devshield/hosts_blocklist.json.",
+  "groups": [
+    { "name": "Ubuntu usage reporting",
+      "why": "ubuntu-report (install metrics), popularity-contest, whoopsie/apport crash upload",
+      "domains": ["metrics.ubuntu.com", "popcon.ubuntu.com", "daisy.ubuntu.com"] },
+    { "name": "Visual Studio Code / .NET SDK telemetry",
+      "why": "Application Insights and Microsoft telemetry ingestion used by VS Code and the dotnet CLI",
+      "domains": ["dc.services.visualstudio.com", "vortex.data.microsoft.com", "mobile.events.data.microsoft.com", "default.exp-tas.com"] },
+    { "name": "JavaScript tooling telemetry",
+      "why": "Next.js CLI anonymous telemetry",
+      "domains": ["telemetry.nextjs.org"] }
+  ],
+  "never_block": [
+    "archive.ubuntu.com", "security.ubuntu.com", "ports.ubuntu.com", "api.snapcraft.io",
+    "update.code.visualstudio.com", "marketplace.visualstudio.com", "registry.npmjs.org",
+    "github.com", "api.github.com", "objects.githubusercontent.com"
+  ]
+}
