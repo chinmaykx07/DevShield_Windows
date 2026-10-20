@@ -103,6 +103,29 @@
     "api-inference.huggingface.co"
   ],
 
+  "llm_env_vars": [
+    "OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_API_BASE", "AZURE_OPENAI_API_KEY", "AZURE_OPENAI_ENDPOINT",
+    "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX",
+    "GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GENAI_USE_VERTEXAI",
+    "MISTRAL_API_KEY", "GROQ_API_KEY", "DEEPSEEK_API_KEY", "XAI_API_KEY", "TOGETHER_API_KEY", "COHERE_API_KEY",
+    "OPENROUTER_API_KEY", "PERPLEXITY_API_KEY", "FIREWORKS_API_KEY", "HF_TOKEN", "HUGGINGFACEHUB_API_TOKEN",
+    "OLLAMA_HOST", "LITELLM_*", "LANGCHAIN_*", "LANGSMITH_*"
+  ],
+
+  "ai_libraries": [
+    { "pattern": "ggml",             "label": "llama.cpp / ggml",    "weight": 3 },
+    { "pattern": "llama",            "label": "llama.cpp",           "weight": 3 },
+    { "pattern": "whisper",          "label": "whisper.cpp",         "weight": 2 },
+    { "pattern": "ctranslate2",      "label": "CTranslate2",         "weight": 3 },
+    { "pattern": "mlc_llm",          "label": "MLC LLM",             "weight": 3 },
+    { "pattern": "onnxruntime-genai","label": "ONNX Runtime GenAI",  "weight": 3 },
+    { "pattern": "torch_cpu",        "label": "PyTorch",             "weight": 2 },
+    { "pattern": "torch_cuda",       "label": "PyTorch (CUDA)",      "weight": 2 },
+    { "pattern": "openvino",         "label": "OpenVINO",            "weight": 2 },
+    { "pattern": "tensorflow",       "label": "TensorFlow",          "weight": 2 },
+    { "pattern": "onnxruntime",      "label": "ONNX Runtime",        "weight": 1 }
+  ],
+
   "agent_keywords": [
     "modelcontextprotocol", "mcp-server", "langchain", "langgraph", "autogen", "crewai",
     "openai-agents", "claude-agent-sdk", "anthropic", "ollama", "llama_cpp", "llama-cpp",
@@ -110,6 +133,36 @@
   ],
 
   "shell_names": ["pwsh.exe", "powershell.exe", "cmd.exe", "bash.exe", "sh.exe", "wsl.exe", "bash", "sh", "zsh"],
+
+  "tool_processes": [
+    "git.exe", "curl.exe", "wget.exe", "python.exe", "python3.exe", "node.exe", "npm.cmd", "npx.cmd",
+    "rg.exe", "grep.exe", "findstr.exe", "where.exe", "tasklist.exe", "taskkill.exe", "ipconfig.exe",
+    "ssh.exe", "scp.exe", "tar.exe", "7z.exe", "robocopy.exe", "xcopy.exe", "icacls.exe",
+    "whoami.exe", "net.exe", "net1.exe", "netstat.exe", "nltest.exe", "systeminfo.exe", "reg.exe",
+    "schtasks.exe", "sc.exe", "wmic.exe", "certutil.exe", "bitsadmin.exe", "vssadmin.exe", "cmdkey.exe",
+    "rundll32.exe", "regsvr32.exe", "mshta.exe", "wscript.exe", "cscript.exe", "netsh.exe",
+    "git", "curl", "wget", "python3", "node", "rg", "grep", "ssh", "whoami"
+  ],
+
+  "sensitive_tools": [
+    "whoami.exe", "net.exe", "net1.exe", "nltest.exe", "systeminfo.exe", "reg.exe", "schtasks.exe", "sc.exe",
+    "wmic.exe", "certutil.exe", "bitsadmin.exe", "vssadmin.exe", "cmdkey.exe", "rundll32.exe", "regsvr32.exe",
+    "mshta.exe", "wscript.exe", "cscript.exe", "netsh.exe", "icacls.exe", "whoami"
+  ],
+
+  "terminal_hosts": [
+    "windowsterminal.exe", "openconsole.exe", "conhost.exe", "explorer.exe", "wezterm-gui.exe", "alacritty.exe"
+  ],
+
+  "risky_flags": [
+    "--dangerously-skip-permissions", "--dangerously-bypass-approvals-and-sandbox", "bypassPermissions",
+    "--yolo", "--full-auto", "--auto-approve", "--no-confirm", "--trust-all-tools", "--allow-all-tools"
+  ],
+
+  "unusual_paths": [
+    "[\\\\/]appdata[\\\\/]local[\\\\/]temp[\\\\/]", "[\\\\/]windows[\\\\/]temp[\\\\/]", "[\\\\/]downloads[\\\\/]",
+    "[\\\\/]users[\\\\/]public[\\\\/]", "\\$recycle\\.bin", "^/tmp/", "^/dev/shm/"
+  ],
 
   "ignore_processes": [
     "devshield.exe", "chrome.exe", "msedge.exe", "firefox.exe", "brave.exe", "opera.exe", "vivaldi.exe",

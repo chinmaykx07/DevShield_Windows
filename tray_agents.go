@@ -104,7 +104,11 @@ func refreshAgentMenu() {
 		slotAgents[i] = a
 
 		s.item.SetTitle(formatAgentSlot(a))
-		s.item.SetTooltip(strings.Join(a.Reasons, "; ") + "\n" + a.Exe)
+		tip := a.Exe + "\nWhy it is an agent: " + strings.Join(a.Reasons, "; ")
+		if len(a.ActiveRisks) > 0 {
+			tip = "Rogue indicators: " + strings.Join(a.ActiveRisks, "; ") + "\n" + tip
+		}
+		s.item.SetTooltip(tip)
 		if a.Status == AgentSanctioned {
 			s.sanction.SetTitle(bilingual("✅ Sanctioned", "✅ स्वीकृत"))
 			s.sanction.Disable()
@@ -122,39 +126,53 @@ func refreshAgentMenu() {
 }
 
 func formatAgentsLabel(agents []RunningAgent) string {
-	unsanctioned := 0
+	rogue, attention := 0, 0
 	for _, a := range agents {
-		if a.Status != AgentSanctioned {
-			unsanctioned++
+		switch a.Verdict {
+		case VerdictRogue:
+			rogue++
+		case VerdictRisky, VerdictUnsanctioned:
+			attention++
 		}
 	}
 	more := ""
 	if len(agents) > maxAgentSlots {
 		more = fmt.Sprintf(" (+%d)", len(agents)-maxAgentSlots)
 	}
-	if unsanctioned == 0 {
+	switch {
+	case rogue > 0:
 		return bilingual(
-			fmt.Sprintf("🤖 AI Agents: %d running%s", len(agents), more),
-			fmt.Sprintf("🤖 AI-प्रतिनिधि: %d सक्रिय%s", len(agents), more))
+			fmt.Sprintf("🚨 AI Agents: %d running · %d rogue suspect%s", len(agents), rogue, more),
+			fmt.Sprintf("🚨 AI-प्रतिनिधि: %d सक्रिय · %d संदिग्ध%s", len(agents), rogue, more))
+	case attention > 0:
+		return bilingual(
+			fmt.Sprintf("🤖 AI Agents: %d running · %d need review ⚠%s", len(agents), attention, more),
+			fmt.Sprintf("🤖 AI-प्रतिनिधि: %d सक्रिय · %d समीक्षा हेतु ⚠%s", len(agents), attention, more))
 	}
 	return bilingual(
-		fmt.Sprintf("🤖 AI Agents: %d running · %d unsanctioned ⚠%s", len(agents), unsanctioned, more),
-		fmt.Sprintf("🤖 AI-प्रतिनिधि: %d सक्रिय · %d अस्वीकृत ⚠%s", len(agents), unsanctioned, more))
+		fmt.Sprintf("🤖 AI Agents: %d running%s", len(agents), more),
+		fmt.Sprintf("🤖 AI-प्रतिनिधि: %d सक्रिय%s", len(agents), more))
 }
 
 func formatAgentSlot(a RunningAgent) string {
-	icon := "⚠"
-	switch {
-	case !a.Known:
-		icon = "❓"
-	case a.Status == AgentSanctioned:
-		icon = "✅"
-	}
+	icon := map[string]string{
+		VerdictRogue:        "🚨",
+		VerdictRisky:        "⚠",
+		VerdictUnsanctioned: "⚠",
+		VerdictSanctioned:   "✅",
+	}[a.Verdict]
 	procs := ""
 	if a.Processes > 1 {
 		procs = fmt.Sprintf(" ×%d", a.Processes)
 	}
-	return fmt.Sprintf("%s %s%s", icon, a.Name, procs)
+	label := ""
+	switch a.Verdict {
+	case VerdictRogue:
+		label = bilingual(" — rogue suspect", " — संदिग्ध")
+	case VerdictRisky:
+		label = bilingual(" — sanctioned but acting suspiciously", " — स्वीकृत, पर संदिग्ध")
+	}
+	return fmt.Sprintf("%s %s%s%s", icon, a.Name, procs, label)
 }
 
 func openFileLocation(path string) {

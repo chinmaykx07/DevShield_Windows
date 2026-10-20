@@ -71,14 +71,44 @@ pwsh -File scripts\hardening\rollback.ps1 -Type privacy
 
 A guardian alert means a process made a network connection that is neither trusted nor known. This is informational, not a block.
 
-### Watching AI agents (Agent Watch)
+### Watching AI agents and catching rogue ones (Agent Watch)
 
-The tray menu **🤖 AI Agents** lists every AI agent running on this PC: coding agents (Claude Code, Codex, Gemini CLI, Copilot CLI…), AI IDEs (Cursor, Windsurf…), VS Code AI extensions, local model runtimes (Ollama, LM Studio…) and MCP servers. It scans every 10 seconds and needs no admin rights.
+The tray menu **🤖 AI Agents** lists every AI agent running on this PC, and flags **rogue suspects**. It scans continuously without admin rights.
 
-Each agent is either **sanctioned** (you approved it) or **unsanctioned** (the default for anything new):
+**Detection is based on behaviour, not names.** A rogue agent won't be in any list, and a bad actor can rename a known one. So a process counts as an AI agent because of what it does:
+- it talks to an LLM API or a local model server (Ollama, LM Studio…)
+- it has LLM API keys or endpoints set specifically for it (keys set for your whole account are ignored)
+- it loads AI model libraries (llama.cpp/ggml, PyTorch, ONNX Runtime…)
+- it keeps launching shells and command-line tools: the "agent loop". Tools run through a shell (`agent → pwsh → tool`) count for the agent.
 
-| Icon | Meaning |
-|---|---|
+The built-in catalog (Claude Code, Codex, Cursor, Ollama…) only adds a name label. It never makes an agent trusted.
+
+**Rogue indicators** apply to every agent, named or not:
+- **undocumented**: matches no catalog entry
+- runs from Temp, Downloads, Public or the Recycle Bin
+- started with approvals switched off (`--dangerously-skip-permissions`, `--yolo`, `--full-auto`…)
+- launched recon, persistence or credential tools (`whoami`, `net`, `schtasks`, `reg`, `certutil`, `cmdkey`…)
+- registered to start automatically (Run keys, Startup folder)
+- detached: still launching tools after its parent process is gone
+
+| Icon | Verdict | Meaning |
+|---|---|---|
+| 🚨 | **Rogue suspect** | Not sanctioned, and undocumented or showing rogue indicators. Investigate. |
+| ⚠ | **Risky** | You sanctioned it, but it is now showing rogue indicators (e.g. a trusted agent misused). |
+| ⚠ | **Unsanctioned** | Known agent, nothing suspicious, not yet approved. |
+| ✅ | **Sanctioned** | Approved and behaving normally. |
+
+Hover an entry to see *why* it is considered an agent and which rogue indicators it shows. **Sanction this agent** approves that exact program. Sanctioning clears only the "undocumented" indicator: behavioural indicators still alert, and a changed program file revokes the approval.
+
+Audit events: `AGENT_ROGUE_SUSPECT`, `AGENT_RISKY`, `AGENT_NEW`, `AGENT_UNKNOWN`, `AGENT_CHANGED`, `AGENT_UNSANCTIONED_START`, `AGENT_SANCTIONED`.
+
+**Limits:**
+- Agent Watch only alerts. It never stops or blocks anything.
+- Without admin it can't fully inspect other users' or elevated processes.
+- Commands that finish in well under half a second may be missed, because the process list is sampled every 0.5 s. Event-based capture that catches every process is planned for the admin-mode phase.
+- Command lines are redacted (keys and tokens masked) before logging, and environment variable *values* are never stored.
+
+---|---|
 | ✅ | Sanctioned. No alerts while its program file stays the same. |
 | ⚠ | Known agent, not yet sanctioned. |
 | ❓ | Not in the catalog, but behaving like an AI agent (e.g. calling an LLM API and running shells). Check it. |

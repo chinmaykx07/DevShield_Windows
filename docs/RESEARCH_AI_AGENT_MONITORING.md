@@ -5,7 +5,7 @@ Goal (kept deliberately simple):
 1. **Know every AI agent running on this machine.**
 2. **Alert when an unknown or new agent / AI process appears.**
 
-**Status:** Phase 1 ("Agent Watch") is implemented in `agentwatch*.go`, `tray_agents.go` and `assets/agent_catalog.json`, with unit tests in `agentwatch_test.go`. It is not yet tested on Windows. The catalog's process names and paths still need confirming on a real machine. Not built yet: the MCP config-file scan (S4), Phase 2 and Phase 3.
+**Status:** Phase 1 ("Agent Watch") is implemented in `agentwatch*.go`, `tray_agents.go` and `assets/agent_catalog.json`, with unit tests and a live end-to-end test (a renamed, undocumented fake agent caught as a rogue suspect from behaviour alone). It is **behaviour-first**: the catalog is only an identity label, and rogue verdicts come from behaviour plus rogue indicators (see section 4b). It is not yet tested on Windows. Not built yet: the MCP config-file scan (S4), event-based process capture (Phase 2) and Phase 3.
 
 ---
 
@@ -79,6 +79,28 @@ Run it in **Go** with **gopsutil** (already used by `context.go`), *not* as a Po
    - Known agent whose **hash changed** → alert "Agent updated/changed" (catches a replaced binary).
 4. **Config scan (every few minutes, S4):** list each agent's MCP servers and flag **auto-approve / skip-permissions** modes. Defender treats those as the main risk indicator.
 5. **UI:** a tray submenu **"🤖 AI Agents (N running)"** listing what's running, with an alert toast for new or unknown ones. Actions: *Approve* (trust this exe+hash), *Ignore*, and *Open file location*. **No auto-kill** in phase 1: alert only, as Defender's discovery does.
+
+### 4b. As built: behaviour-first rogue detection
+Rogue agents are by definition undocumented, or a known agent misused by a bad actor, so **no list can be the detector**. Agent Watch scores every process on behaviour, ignoring its name:
+
+| Agent-likeness signal | Points |
+|---|---|
+| Serves a model on a local LLM port | 3 |
+| In-process AI libraries (llama.cpp/ggml, CTranslate2, MLC; PyTorch/OpenVINO/TF score 2; ONNX Runtime 1) | 1–3 |
+| Connected to an LLM API host | 2 |
+| Client of a local model server | 2 |
+| LLM keys/endpoints set **for this process** (globally inherited vars ignored) | 2 |
+| Agent loop: ≥3 shells/tools launched in 5 min (credited through shells) | 2 (1 for 1–2) |
+| Agent framework named in the command line (weak, easily removed) | 1 |
+
+A process at **≥3** is an agent. Shells and terminals launching tools are excluded, since that is a human typing. Then **rogue indicators** are checked for every agent, catalogued or not: undocumented · unusual location · approvals-disabled flags · recon/persistence/credential tools launched · auto-start registration · detached. Verdict: **rogue** = unsanctioned + any indicator (an undocumented agent is a rogue until sanctioned). **Risky** = sanctioned but showing behavioural indicators.
+
+Known gaps:
+- Polling at 0.5 s misses very short commands.
+- An agent using an unknown relay with no keys in its environment and no tool loop scores below threshold.
+- WSL, Docker and browser-hosted agents are not visible.
+
+Phase 2's event capture and DNS attribution address the first two.
 
 ### Phase 2: real-time and Windows-native (admin, via the scheduled task)
 - **Process start events:** Kernel-Process ETW, so short-lived agents aren't missed. Alternatives:

@@ -6,11 +6,14 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
-- Agent Watch: tray inventory of running AI agents (CLI agents, AI IDEs,
-  VS Code AI extensions, local model runtimes, MCP servers). Sanction or
-  leave unsanctioned; audit alerts for new, changed, unknown and
-  unsanctioned agents. Alert-only, no admin needed. Not yet tested on
-  Windows. See `docs/RESEARCH_AI_AGENT_MONITORING.md`.
+- Agent Watch: behaviour-first detection of AI agents and rogue agents.
+  Any process is classed as an agent by behaviour (LLM traffic, LLM keys
+  set for it, AI libraries loaded, shell/tool agent loop), never by name.
+  Rogue indicators (undocumented, Temp/Downloads location,
+  approvals-disabled flags, recon/persistence tools, auto-start, detached)
+  give 🚨 rogue-suspect and ⚠ risky verdicts. Sanction approved agents from
+  the tray. Alert-only, no admin needed. Not yet tested on Windows. See
+  `docs/RESEARCH_AI_AGENT_MONITORING.md`.
 
 ### Fixed
 - App froze on Quit (`closeAudit` self-deadlock on `auditMu`).

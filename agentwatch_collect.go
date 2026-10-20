@@ -1,16 +1,21 @@
 // agentwatch_collect.go — Agent Watch scanner (runs inside the tray)
 //
-// Every scanInterval it:
-//   1. snapshots processes + TCP connections via gopsutil (no admin needed)
-//   2. classifies them against the agent catalog (agentwatch.go)
-//   3. records each agent in audit.db (agentwatch_store.go)
-//   4. writes an audit event when something needs attention:
-//        AGENT_NEW                 — an agent never seen before
-//        AGENT_UNKNOWN             — a non-catalog process that behaves like an AI agent
-//        AGENT_CHANGED             — an agent's executable changed (approval revoked)
-//        AGENT_UNSANCTIONED_START  — an unsanctioned agent started running again
+// Two loops:
+//   fast tick (0.5s) — cheap process list → remembers which tools/shells each
+//                     process launched (the "agent loop" signal)
+//   scan (10s)      — full snapshot: processes, command lines, TCP
+//                     connections, LLM env vars, loaded AI libraries,
+//                     auto-start entries → classify → verdict → alerts
 //
-// Alert only: Agent Watch never kills or blocks a process.
+// Audit events written:
+//   AGENT_NEW / AGENT_UNKNOWN    — first sighting (catalogued / undocumented)
+//   AGENT_CHANGED                — executable or script changed (approval revoked)
+//   AGENT_ROGUE_SUSPECT          — unsanctioned + undocumented or suspicious behaviour
+//   AGENT_RISKY                  — sanctioned agent now showing rogue indicators
+//   AGENT_UNSANCTIONED_START     — a known, unsanctioned agent started running
+//
+// Alert only: Agent Watch never kills or blocks a process. No admin needed;
+// processes of other users / elevated processes are only partly visible.
 
 package main
 
@@ -34,9 +39,14 @@ import (
 
 const (
 	agentScanInterval    = 10 * time.Second
+	spawnTickInterval    = 500 * time.Millisecond // shorter misses fewer quick commands; see notes on ETW
+	spawnWindow          = 5 * time.Minute
 	llmResolveInterval   = 15 * time.Minute
-	maxHashFileSize      = 512 << 20 // skip hashing executables above 512 MB
-	agentDetailMaxLength = 300
+	autostartInterval    = 2 * time.Minute
+	moduleRefreshAge     = 2 * time.Minute
+	moduleRefreshPerScan = 40        // spread module reads across scans
+	maxHashFileSize      = 512 << 20 // skip hashing files above 512 MB
+	agentDetailMaxLength = 400
 )
 
 // RunningAgent is one agent currently running, merged across all of its
@@ -44,13 +54,18 @@ const (
 type RunningAgent struct {
 	Detection
 	Fingerprint string
-	Status      string
+	Status      string // sanction status from the store
+	Verdict     string // sanctioned | unsanctioned | risky | rogue
+	ActiveRisks []string
 	Processes   int
 }
 
 type cachedProc struct {
 	createTime int64
 	info       ProcInfo
+	envHits    []string
+	modules    []string
+	modulesAt  time.Time
 }
 
 type hashEntry struct {
@@ -65,11 +80,16 @@ type AgentWatcher struct {
 	running   []RunningAgent
 	callbacks []func()
 
-	llmIPs     map[string]string // ip → LLM API host
-	resolvedAt time.Time
+	llmIPs      map[string]string // ip → LLM API host
+	resolvedAt  time.Time
+	autostart   map[string]string
+	autostartAt time.Time
 
+	envBase   map[string]string
 	procCache map[int32]cachedProc
 	hashCache map[string]hashEntry
+	spawns    *spawnTracker
+	alerted   map[string]string // fingerprint → verdict+risks last alerted
 
 	stopCh chan struct{}
 }
@@ -78,6 +98,9 @@ var agentWatch = &AgentWatcher{
 	procCache: map[int32]cachedProc{},
 	hashCache: map[string]hashEntry{},
 	llmIPs:    map[string]string{},
+	autostart: map[string]string{},
+	spawns:    newSpawnTracker(spawnWindow),
+	alerted:   map[string]string{},
 	stopCh:    make(chan struct{}),
 }
 
@@ -102,8 +125,10 @@ func initAgentWatch() {
 
 	agentWatch.mu.Lock()
 	agentWatch.catalog = cat
+	agentWatch.envBase = envBaseline(os.Environ())
 	agentWatch.mu.Unlock()
 
+	go agentWatch.runSpawnTicker()
 	go agentWatch.run()
 	log.Printf("agentwatch: started (catalog %s, %d agents)", cat.Version, len(cat.Agents))
 }
@@ -122,7 +147,27 @@ func agentDB() *sql.DB {
 	return auditDB
 }
 
-// ── SCANNER GOROUTINE ─────────────────────────────────────────
+// ── LOOPS ─────────────────────────────────────────────────────
+
+func (w *AgentWatcher) runSpawnTicker() {
+	ticker := time.NewTicker(spawnTickInterval)
+	defer ticker.Stop()
+	for {
+		w.mu.RLock()
+		cat := w.catalog
+		w.mu.RUnlock()
+		if procs, err := fastProcList(); err == nil && cat != nil {
+			w.spawns.observe(procs, time.Now(),
+				func(n string) bool { return cat.tools[n] },
+				func(n string) bool { return cat.shells[n] })
+		}
+		select {
+		case <-w.stopCh:
+			return
+		case <-ticker.C:
+		}
+	}
+}
 
 func (w *AgentWatcher) run() {
 	w.scan()
@@ -150,7 +195,8 @@ func (w *AgentWatcher) scan() {
 	}
 
 	w.refreshLLMIPs(cat)
-	snap, err := w.collect()
+	w.refreshAutostart()
+	snap, err := w.collect(cat)
 	if err != nil {
 		log.Printf("agentwatch: scan failed: %v", err)
 		return
@@ -171,33 +217,41 @@ func (w *AgentWatcher) scan() {
 	for i := range running {
 		a := &running[i]
 		a.Status = AgentUnsanctioned
-		if db == nil {
-			continue
-		}
-		// For script-run agents the script is what can be swapped out,
-		// so hash it when it is a file; otherwise hash the executable.
-		hashPath := a.Exe
-		if a.Target != "" {
-			if st, err := os.Stat(a.Target); err == nil && !st.IsDir() {
-				hashPath = a.Target
+		change := SightingSeenBefore
+
+		if db != nil {
+			ch, status, err := recordSighting(db, a.Detection, w.hashFile(hashTarget(a)), now)
+			if err != nil {
+				log.Printf("agentwatch: record %s: %v", a.Name, err)
+			} else {
+				change, a.Status = ch, status
 			}
 		}
-		change, status, err := recordSighting(db, a.Detection, w.hashFile(hashPath), now)
-		if err != nil {
-			log.Printf("agentwatch: record %s: %v", a.Name, err)
-			continue
-		}
-		a.Status = status
+		a.Verdict, a.ActiveRisks = AgentVerdict(a.Status, a.Risks)
 
-		switch {
-		case change == SightingNew && !a.Known:
-			WriteGoEvent("AGENT_UNKNOWN", agentDetail(a), "warn")
-		case change == SightingNew:
-			WriteGoEvent("AGENT_NEW", agentDetail(a), "warn")
-		case change == SightingHashChanged:
+		switch change {
+		case SightingNew:
+			if a.Known {
+				WriteGoEvent("AGENT_NEW", agentDetail(a), "warn")
+			} else {
+				WriteGoEvent("AGENT_UNKNOWN", agentDetail(a), "warn")
+			}
+		case SightingHashChanged:
 			WriteGoEvent("AGENT_CHANGED", agentDetail(a), "warn")
-		case !prev[a.Fingerprint] && status == AgentUnsanctioned:
-			WriteGoEvent("AGENT_UNSANCTIONED_START", agentDetail(a), "warn")
+		}
+
+		w.alertVerdict(a, prev[a.Fingerprint])
+	}
+
+	// Forget alert state for agents that stopped, so a rogue agent that
+	// comes back later raises a fresh alert.
+	current := make(map[string]bool, len(running))
+	for _, a := range running {
+		current[a.Fingerprint] = true
+	}
+	for fp := range w.alerted {
+		if !current[fp] {
+			delete(w.alerted, fp)
 		}
 	}
 
@@ -214,18 +268,70 @@ func (w *AgentWatcher) scan() {
 	}
 }
 
-// mergeDetections collapses many processes of one agent into one entry.
+// alertVerdict raises a verdict alert once per (agent, verdict, risk set),
+// so a rogue agent that keeps running doesn't flood the log, but a NEW
+// risk on the same agent alerts again.
+func (w *AgentWatcher) alertVerdict(a *RunningAgent, wasRunning bool) {
+	key := a.Verdict + "|" + strings.Join(a.ActiveRisks, "|")
+	if w.alerted[a.Fingerprint] == key {
+		return
+	}
+	w.alerted[a.Fingerprint] = key
+
+	switch a.Verdict {
+	case VerdictRogue:
+		WriteGoEvent("AGENT_ROGUE_SUSPECT", agentDetail(a), "warn")
+	case VerdictRisky:
+		WriteGoEvent("AGENT_RISKY", agentDetail(a), "warn")
+	case VerdictUnsanctioned:
+		if !wasRunning {
+			WriteGoEvent("AGENT_UNSANCTIONED_START", agentDetail(a), "warn")
+		}
+	}
+}
+
+// hashTarget picks the file whose change should revoke approval: the
+// script for node/python/uvx agents, otherwise the executable.
+func hashTarget(a *RunningAgent) string {
+	if a.Target != "" {
+		if st, err := os.Stat(a.Target); err == nil && !st.IsDir() {
+			return a.Target
+		}
+	}
+	return a.Exe
+}
+
+// mergeDetections collapses many processes of one agent into one entry,
+// keeping the union of reasons and risks (a single helper process doing
+// something suspicious makes the whole agent suspicious).
 func mergeDetections(dets []Detection) []RunningAgent {
 	byFP := map[string]int{}
 	var out []RunningAgent
 	for _, d := range dets {
 		fp := AgentFingerprint(d)
-		if i, ok := byFP[fp]; ok {
-			out[i].Processes++
+		i, ok := byFP[fp]
+		if !ok {
+			byFP[fp] = len(out)
+			d.Reasons = append([]string(nil), d.Reasons...)
+			d.Risks = append([]string(nil), d.Risks...)
+			out = append(out, RunningAgent{Detection: d, Fingerprint: fp, Processes: 1})
 			continue
 		}
-		byFP[fp] = len(out)
-		out = append(out, RunningAgent{Detection: d, Fingerprint: fp, Processes: 1})
+		a := &out[i]
+		a.Processes++
+		if d.AgentScore > a.AgentScore {
+			a.AgentScore = d.AgentScore
+		}
+		for _, r := range d.Reasons {
+			if !containsString(a.Reasons, r) {
+				a.Reasons = append(a.Reasons, r)
+			}
+		}
+		for _, r := range d.Risks {
+			if !containsString(a.Risks, r) {
+				a.Risks = append(a.Risks, r)
+			}
+		}
 	}
 	return out
 }
@@ -237,7 +343,7 @@ func sameRunning(a, b []RunningAgent) bool {
 	key := func(r []RunningAgent) []string {
 		ks := make([]string, len(r))
 		for i, x := range r {
-			ks[i] = x.Fingerprint + "|" + x.Status
+			ks[i] = x.Fingerprint + "|" + x.Verdict + "|" + strings.Join(x.ActiveRisks, ";")
 		}
 		sort.Strings(ks)
 		return ks
@@ -252,7 +358,11 @@ func sameRunning(a, b []RunningAgent) bool {
 }
 
 func agentDetail(a *RunningAgent) string {
-	d := fmt.Sprintf("%s · %s · %s", a.Name, a.Exe, strings.Join(a.Reasons, "; "))
+	d := fmt.Sprintf("%s · %s · verdict:%s", a.Name, a.Exe, a.Verdict)
+	if len(a.ActiveRisks) > 0 {
+		d += " · risks: " + strings.Join(a.ActiveRisks, "; ")
+	}
+	d += " · why agent: " + strings.Join(a.Reasons, "; ")
 	if a.Cmdline != "" {
 		d += " · cmd: " + redactSecrets(a.Cmdline)
 	}
@@ -264,40 +374,67 @@ func agentDetail(a *RunningAgent) string {
 
 // ── COLLECTION ────────────────────────────────────────────────
 
-func (w *AgentWatcher) collect() (Snapshot, error) {
+func (w *AgentWatcher) collect(cat *AgentCatalog) (Snapshot, error) {
 	procs, err := process.Processes()
 	if err != nil {
 		return Snapshot{}, err
 	}
 
-	self := int32(os.Getpid())
+	w.mu.RLock()
+	envBase := w.envBase
+	autostart := w.autostart
+	w.mu.RUnlock()
+
+	// DevShield itself is NOT skipped here: it must stay in the process
+	// list so its children don't look orphaned. It is excluded from
+	// classification by name via the catalog's ignore_processes.
 	seen := make(map[int32]bool, len(procs))
 	snap := Snapshot{
 		ListenPorts:     map[int32][]int{},
 		RemoteEndpoints: map[int32][]string{},
+		Behavior:        map[int32]*ProcBehavior{},
+		Autostart:       autostart,
 	}
+	now := time.Now()
+	moduleBudget := moduleRefreshPerScan
 
 	for _, p := range procs {
-		if p.Pid == self || p.Pid == 0 {
+		if p.Pid == 0 {
 			continue
 		}
 		seen[p.Pid] = true
 		ct, _ := p.CreateTime()
 
-		// Cmdline/exe/user lookups are expensive on Windows — reuse them
-		// while the PID still belongs to the same process.
-		if c, ok := w.procCache[p.Pid]; ok && c.createTime == ct {
-			snap.Procs = append(snap.Procs, c.info)
-			continue
+		// Cmdline/exe/user/env lookups are expensive on Windows — do them
+		// once per process lifetime (PID + create time).
+		c, ok := w.procCache[p.Pid]
+		if !ok || c.createTime != ct {
+			c = cachedProc{createTime: ct, info: ProcInfo{PID: p.Pid}}
+			c.info.Name, _ = p.Name()
+			c.info.PPID, _ = p.Ppid()
+			c.info.Exe, _ = p.Exe()
+			c.info.Cmdline, _ = p.Cmdline()
+			c.info.User, _ = p.Username()
+			if env, err := p.Environ(); err == nil {
+				c.envHits = llmEnvHits(env, envBase, cat.LLMEnvVars)
+			}
 		}
-		info := ProcInfo{PID: p.Pid}
-		info.Name, _ = p.Name()
-		info.PPID, _ = p.Ppid()
-		info.Exe, _ = p.Exe()
-		info.Cmdline, _ = p.Cmdline()
-		info.User, _ = p.Username()
-		w.procCache[p.Pid] = cachedProc{createTime: ct, info: info}
-		snap.Procs = append(snap.Procs, info)
+		// Libraries load lazily, so module lists are refreshed periodically,
+		// a limited number per scan to keep each scan cheap.
+		if !cat.ignore[strings.ToLower(c.info.Name)] && moduleBudget > 0 &&
+			now.Sub(c.modulesAt) > moduleRefreshAge {
+			c.modules = processModules(p.Pid)
+			c.modulesAt = now
+			moduleBudget--
+		}
+		w.procCache[p.Pid] = c
+
+		snap.Procs = append(snap.Procs, c.info)
+		snap.Behavior[p.Pid] = &ProcBehavior{
+			EnvHits:    c.envHits,
+			Modules:    c.modules,
+			ToolSpawns: w.spawns.recent(p.Pid),
+		}
 	}
 	for pid := range w.procCache {
 		if !seen[pid] {
@@ -324,7 +461,7 @@ func (w *AgentWatcher) collect() (Snapshot, error) {
 
 // refreshLLMIPs resolves the catalog's LLM API hosts so connections can be
 // matched by IP. Shared CDN IPs make this a weak signal on its own, which
-// is why it only adds 2 points in scoreUnknown.
+// is why it only adds 2 points in agentScore.
 func (w *AgentWatcher) refreshLLMIPs(cat *AgentCatalog) {
 	w.mu.RLock()
 	fresh := time.Since(w.resolvedAt) < llmResolveInterval
@@ -352,7 +489,21 @@ func (w *AgentWatcher) refreshLLMIPs(cat *AgentCatalog) {
 	w.mu.Unlock()
 }
 
-// hashFile returns the SHA-256 of an executable, cached by size + mtime.
+func (w *AgentWatcher) refreshAutostart() {
+	w.mu.RLock()
+	fresh := time.Since(w.autostartAt) < autostartInterval
+	w.mu.RUnlock()
+	if fresh {
+		return
+	}
+	entries := autostartEntries()
+	w.mu.Lock()
+	w.autostart = entries
+	w.autostartAt = time.Now()
+	w.mu.Unlock()
+}
+
+// hashFile returns the SHA-256 of a file, cached by size + mtime.
 func (w *AgentWatcher) hashFile(path string) string {
 	if path == "" {
 		return ""
@@ -381,35 +532,23 @@ func (w *AgentWatcher) hashFile(path string) string {
 
 // ── PUBLIC API ────────────────────────────────────────────────
 
-// RunningAgents returns the agents seen in the latest scan,
-// unknown and unsanctioned ones first.
+// verdictRank orders the menu: rogue first, then risky, unsanctioned, sanctioned.
+var verdictRank = map[string]int{VerdictRogue: 0, VerdictRisky: 1, VerdictUnsanctioned: 2, VerdictSanctioned: 3}
+
+// RunningAgents returns the agents seen in the latest scan, most urgent first.
 func RunningAgents() []RunningAgent {
 	agentWatch.mu.RLock()
 	defer agentWatch.mu.RUnlock()
 	out := make([]RunningAgent, len(agentWatch.running))
 	copy(out, agentWatch.running)
 	sort.SliceStable(out, func(i, j int) bool {
-		ri, rj := out[i].Status == AgentSanctioned, out[j].Status == AgentSanctioned
-		if ri != rj {
-			return !ri
-		}
-		return false
+		return verdictRank[out[i].Verdict] < verdictRank[out[j].Verdict]
 	})
 	return out
 }
 
-// UnsanctionedAgentCount is the number of running agents not yet approved.
-func UnsanctionedAgentCount() int {
-	n := 0
-	for _, a := range RunningAgents() {
-		if a.Status != AgentSanctioned {
-			n++
-		}
-	}
-	return n
-}
-
 // SanctionAgent records the user's approval of one agent installation.
+// Behavioural risks still alert after sanctioning (verdict becomes "risky").
 func SanctionAgent(fingerprint string) error {
 	db := agentDB()
 	if db == nil {
@@ -422,9 +561,11 @@ func SanctionAgent(fingerprint string) error {
 	agentWatch.mu.Lock()
 	name := fingerprint
 	for i := range agentWatch.running {
-		if agentWatch.running[i].Fingerprint == fingerprint {
-			agentWatch.running[i].Status = AgentSanctioned
-			name = agentWatch.running[i].Name
+		a := &agentWatch.running[i]
+		if a.Fingerprint == fingerprint {
+			a.Status = AgentSanctioned
+			a.Verdict, a.ActiveRisks = AgentVerdict(a.Status, a.Risks)
+			name = a.Name
 		}
 	}
 	cbs := agentWatch.callbacks
@@ -437,8 +578,8 @@ func SanctionAgent(fingerprint string) error {
 	return nil
 }
 
-// OnAgentsChanged registers a callback fired when the running set or a
-// sanction status changes. tray.go uses it to refresh the agents menu.
+// OnAgentsChanged registers a callback fired when the running set, a
+// verdict or a sanction status changes. tray.go refreshes its menu here.
 func OnAgentsChanged(cb func()) {
 	agentWatch.mu.Lock()
 	defer agentWatch.mu.Unlock()
