@@ -1,7 +1,7 @@
 # DevShield Roadmap: Linux-first, Windows + Linux variants, x402
 
 Date: 2026-10-20
-Status: proposal. The decisions in section 7 are needed before the restructuring starts.
+Status: decisions taken 2026-10-20 (section 7). Section 8 covers the owner-sovereignty / "they pay us" vision.
 
 ---
 
@@ -119,11 +119,47 @@ It was started by Coinbase and is now governed by an x402 foundation. It has Go 
 
 **Bottom line:** x402 is a better **security problem to solve** (agents with wallets) than a **revenue stream**. Option A fits DevShield's purpose and costs little. Option B can be tried later as a small experiment with honest expectations: tens of dollars a month unless the feed becomes widely used.
 
-## 7. Decisions needed
-1. **Linux v1 scope:** headless daemon + CLI with Agent Watch/network/sensors first (recommended), or full feature parity before any release?
-2. **PowerShell:** migrate everything into Go (recommended: faster, cross-platform, and fixes C1–C8 by replacement), or keep the PowerShell features on Windows and fix them in place?
-3. **x402:** build option A (Agent Spend Watch) now, also prototype B, or park x402?
-4. **Repository:** the repo is named `DevShield_Windows`. Rename it (e.g. `DevShield`) now that it targets both OSes? Only the owner can do this, in GitHub settings.
+## 7. Decisions (taken 2026-10-20)
+1. **Linux v1 = full feature parity before release.** All features get Linux backends in Go (thermal, sensors, network monitor, hosts sinkhole, a real nftables kill-switch, rollback, dashboard/CLI, tray + headless daemon). Phases L1 and L2 above merge into one release.
+2. **Windows keeps PowerShell, fixed in place.** The review findings C1–C8 get fixed in the existing scripts. Linux gets its own Go backends, so there are two implementations of the system-changing features. The shared Go core (Agent Watch, audit, tray) stays common.
+3. **Order: Linux → Windows → macOS.** The repo keeps its name `DevShield_Windows`.
+4. **x402: see section 8.** The goal is owner sovereignty, not x402 for its own sake.
+
+### Revised phases
+- **Phase L (Linux, full parity):** root helper (systemd) · sensors (hwmon) · thermal (cpufreq/boost) · hosts sinkhole · nftables kill-switch + LLMNR/MAC · network monitor · rollback in Go with tests · Agent Watch · daemon + CLI + tray · .deb/.rpm packaging · CI on Linux.
+- **Phase W (Windows):** fix C1–C8 in the PowerShell scripts, run on a real Windows machine/VM, test Agent Watch on Windows, ship the installer from CI.
+- **Phase M (macOS):** later. Note the tray library needs CGO on macOS.
+
+## 8. The vision: the owner is the sole sovereign of the machine
+
+> Everything that runs on the system runs by the owner's permission. Even Microsoft and other enterprises must not run agents or take control without it, and if they want to, they should pay.
+
+**The honest technical truth:** a payment protocol only works when the *payer chooses to pay*. x402, L402 and Cloudflare's pay-per-crawl all work the same way: someone **asks your server for something**, and you answer "402: pay first", or refuse. That gives two very different cases:
+
+| Situation | Can we make them pay? | What actually works |
+|---|---|---|
+| Code **already running on your machine** (Windows telemetry, Copilot/agent features, vendor updaters, a rogue agent) | **No.** It isn't asking you for anything; it's sending data out or acting locally. No protocol can bill it. | **Deny by default**: detect, alert, block (hosts, firewall, disabling services/agents, Agent Watch). Sovereignty is enforced by *refusing*, not by *charging*. |
+| An **outside agent that wants something from your machine**: your files, tools (MCP), data, GPU/compute, an API you run | **Yes, if it goes through a gate you control.** | A DevShield **gateway** in front of those resources: per agent, **Allow / Charge / Block** (the same model Cloudflare uses for crawlers). "Charge" answers 402 with an x402 price. |
+
+So DevShield can deliver the vision as a **permission model with three answers**:
+1. **Block**: anything unsanctioned (today's Agent Watch, telemetry sinkhole, firewall).
+2. **Allow**: what the owner sanctioned, with proof (see AP2 below).
+3. **Charge**: outside agents that want access to resources the owner chooses to expose, paid per request via x402.
+
+**Is there something better than x402?** (Researched October 2026; most comparisons are vendor-written.)
+- **x402** (Linux Foundation governance since April 2026, USDC on Base/Solana): **the best fit for "Charge"**. Per-request, machine-to-machine, the most adoption, Go middleware exists, and Vercel's `x402-mcp` already paywalls MCP tool calls.
+- **L402** (Lightning/Bitcoin): same idea in sats, far less activity. An optional second rail at most.
+- **AP2** (Google, moved to the FIDO Alliance in 2026): moves **no money**. It produces *signed mandates proving a user authorized an agent's action*. This is the closest match to **"runs by the owner's permission"**: DevShield could issue signed, revocable permission mandates to sanctioned agents, and treat any agent action without one as unsanctioned. Worth adopting for **Allow**.
+- **ACP** (OpenAI/Stripe) and **Stripe MPP / Visa TAP**: shopping checkout and card-network agent identity. Not a fit for charging agents per access.
+- **Web Bot Auth** (signed agent identity, used with pay-per-crawl): useful so a "Charge"/"Allow" decision can't be dodged by an agent pretending to be another.
+- **Paid-consent data marketplaces** (Killi, PolySwarm-style): the only route where vendors pay *users* for telemetry, and only if the vendor joins voluntarily. Microsoft won't pay individuals, so blocking remains the realistic answer for OS telemetry.
+
+**Where money can realistically come from:**
+1. **People and companies paying for the shield itself.** A Pro tier, and especially **team/fleet monitoring of rogue agents** on dev machines, CI runners and servers. Organisations already pay for agent governance (Microsoft sells exactly this inside Defender for Endpoint Plan 2 / E7). This is the strongest, most dependable revenue.
+2. **The Charge gateway (x402).** Real but small per seller today (≈$47/month average). It grows only if the owner exposes something valuable, such as GPU compute or curated data. DevShield could take a small fee on payments through its gateway, or sell the gateway in the Pro tier.
+3. **Curated threat-intel feed via x402** (option B above): optional, small.
+
+**Proposed build order for the vision:** Block (Linux parity, Phase L) → Allow with signed permission mandates (AP2-style) → Charge gateway for MCP/API/compute with x402. Each step stands on its own, so nothing depends on x402 volume growing.
 
 ---
 
@@ -142,3 +178,16 @@ It was started by Coinbase and is now governed by an x402 foundation. It has Go 
 - [Halborn: x402 security risks and controls](https://www.halborn.com/blog/post/x402-explained-security-risks-and-controls-for-http-402-micropayments)
 - [CryptoDaily: x402 AI-agent payment bugs](https://cryptodaily.co.uk/2026/06/x402-security-ai-agent-payment-bugs)
 - [DEV: x402/AP2/UCP are not your spending policy](https://dev.to/suraj_khaitan_f893c243958/your-ai-agent-can-pay-now-x402-ap2-and-ucp-are-not-your-spending-policy-3l25)
+
+## Sources (alternatives and the "charge" model)
+- [Agent payment protocols tracker: x402 vs AP2 vs ACP vs L402](https://github.com/Pink-Agentic-Payments/agent-payment-protocols-tracker)
+- [ArchitectureDiagram.ai: AP2, x402 and ACP compared](https://architecturediagram.ai/blog/agent-payment-protocols-architecture)
+- [Pondero: x402 vs ACP vs AP2 (October 2026)](https://pondero.ai/agents/guides/x402-vs-acp-vs-ap2-agent-payment-protocols-october-2026/)
+- [AgentLux: x402 vs AP2 vs MPP vs ACP](https://agentlux.ai/blog/the-agent-payments-showdown-x402-vs-ap2-vs-mpp-vs-acp-in-2026)
+- [HyperTrends: x402 vs ACP vs AP2 vs TAP](https://www.hypertrends.com/2026/04/agentic-payments-x402-acp-ap2-tap-comparison/)
+- [Wikipedia: Agentic commerce](https://en.wikipedia.org/wiki/Agentic_commerce)
+- [Vercel: x402-mcp, x402 payments in MCP](https://vercel.com/changelog/402-mcp-enables-x402-payments-in-mcp)
+- [Engadget: Cloudflare will block AI scrapers unless they pay](https://engadget.com/ai/cloudflare-experiment-will-block-ai-bot-scrapers-unless-they-pay-a-fee-121523327.html)
+- [Measure Minds: Cloudflare pay per crawl](https://measuremindsgroup.com/cloudflare-pay-per-crawl)
+- [PolySwarm: paying users for telemetry](https://blog.polyswarm.io/telemetry-new-utility-use-for-nectar-nct)
+- [Future Agenda: data dividend](https://futureagenda.org/insights/data-dividend)
