@@ -7,9 +7,10 @@
 // daemon who is calling; the rules are:
 //
 //	read  (status, agents, events, verify,  root or a configured owner uid
-//	       thermal, privacy)
+//	       thermal, privacy, egress)
 //	write (sanction, revoke, profile,       root only — i.e. the owner via sudo
-//	       sinkhole)
+//	       sinkhole, block, unblock,
+//	       lockdown)
 //
 // A non-root process trying to change policy is recorded as
 // AGENT_TAMPER_ATTEMPT, naming the program that tried.
@@ -29,6 +30,7 @@ import (
 
 	"github.com/chinmaykx07/DevShield_Windows/internal/agentwatch"
 	"github.com/chinmaykx07/DevShield_Windows/internal/auditlog"
+	"github.com/chinmaykx07/DevShield_Windows/internal/egress"
 	"github.com/chinmaykx07/DevShield_Windows/internal/hosts"
 	"github.com/chinmaykx07/DevShield_Windows/internal/ipc"
 	"github.com/chinmaykx07/DevShield_Windows/internal/sensors"
@@ -55,8 +57,9 @@ type Config struct {
 	HostListOverride string // optional root-owned sinkhole list
 }
 
-var readOps = map[string]bool{"status": true, "agents": true, "events": true, "verify": true, "thermal": true, "privacy": true}
-var writeOps = map[string]bool{"sanction": true, "revoke": true, "profile": true, "sinkhole": true}
+var readOps = map[string]bool{"status": true, "agents": true, "events": true, "verify": true, "thermal": true, "privacy": true, "egress": true}
+var writeOps = map[string]bool{"sanction": true, "revoke": true, "profile": true, "sinkhole": true,
+	"block": true, "unblock": true, "lockdown": true}
 
 // authorize decides whether peer may run op. tamper is true when a
 // non-root process attempted a policy change — worth an alert of its own.
@@ -80,6 +83,8 @@ type Daemon struct {
 	logPath string
 	db      *sql.DB
 	watcher *agentwatch.Watcher
+	egress  *egress.Manager // nil when unavailable
+	stop    chan struct{}
 	started time.Time
 	tamper  bool
 
@@ -137,6 +142,7 @@ func start(cfg Config) (*Daemon, error) {
 		logPath: filepath.Join(cfg.StateDir, "audit.log"),
 		started: time.Now(),
 		limited: map[int]*window{},
+		stop:    make(chan struct{}),
 	}
 	for _, uid := range cfg.Owners {
 		d.owners[uid] = true
@@ -184,12 +190,14 @@ func start(cfg Config) (*Daemon, error) {
 	}
 	d.watcher = w
 	w.Start()
+	d.startEgress()
 
 	d.event("DAEMON_STARTED", fmt.Sprintf("version %s, owners %v, uid %d", cfg.Version, cfg.Owners, os.Geteuid()), "ok")
 	return d, nil
 }
 
 func (d *Daemon) close() {
+	close(d.stop)
 	d.watcher.Stop()
 	d.event("DAEMON_STOPPED", "clean shutdown", "ok")
 	d.log.Close()
@@ -292,6 +300,12 @@ func (d *Daemon) handle(peer ipc.Peer, req ipc.Request) ipc.Response {
 		return d.sinkholeStatus()
 	case "sinkhole":
 		return d.setSinkhole(req.Profile, peer)
+	case "egress":
+		return d.egressStatus()
+	case "block", "unblock":
+		return d.setBlock(req.Op, req.ID, peer)
+	case "lockdown":
+		return d.setLockdown(req.Profile, req.Lockdown, peer)
 	}
 	return ipc.Response{Error: "unknown operation"}
 }
@@ -384,6 +398,7 @@ func (d *Daemon) agents() []ipc.Agent {
 			ID: a.ID, Name: a.Name, Vendor: a.Vendor, Kind: a.Kind,
 			Verdict: a.Verdict, Status: a.Status, PID: a.PID, Processes: a.Processes,
 			User: a.User, Exe: a.Exe, Reasons: a.Reasons, Risks: a.ActiveRisks,
+			Blocked: d.egress != nil && d.egress.IsBlocked(a.Fingerprint),
 		})
 	}
 	return out

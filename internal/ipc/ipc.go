@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/chinmaykx07/DevShield_Windows/internal/auditlog"
+	"github.com/chinmaykx07/DevShield_Windows/internal/egress"
 )
 
 // DefaultSocket is where the Linux daemon listens.
@@ -31,10 +32,23 @@ const (
 
 // Request is what a client asks for.
 type Request struct {
-	Op      string `json:"op"`                // status | agents | events | verify | sanction | revoke | thermal | profile
-	ID      string `json:"id,omitempty"`      // agent id for sanction/revoke
-	Limit   int    `json:"limit,omitempty"`   // for events
-	Profile string `json:"profile,omitempty"` // silent|gaming|dev|off for profile; on|off for sinkhole
+	Op       string           `json:"op"`                // see daemon.readOps / daemon.writeOps
+	ID       string           `json:"id,omitempty"`      // agent id for sanction/revoke/block/unblock
+	Limit    int              `json:"limit,omitempty"`   // for events
+	Profile  string           `json:"profile,omitempty"` // silent|gaming|dev|off for profile; on|off for sinkhole; on|off|confirm for lockdown
+	Lockdown *LockdownRequest `json:"lockdown,omitempty"`
+}
+
+// LockdownRequest describes the allowed outbound paths. Users are names
+// or uids; the daemon resolves them.
+type LockdownRequest struct {
+	Via        []string `json:"via,omitempty"`       // tunnel interfaces
+	Endpoints  []string `json:"endpoints,omitempty"` // "ip:port/proto" of the tunnel servers
+	Users      []string `json:"users,omitempty"`
+	Tor        bool     `json:"tor,omitempty"` // allow the Tor daemon's user
+	LAN        bool     `json:"lan,omitempty"`
+	Strict     bool     `json:"strict,omitempty"`
+	ConfirmSec int      `json:"confirm_sec,omitempty"`
 }
 
 // Agent is the client-facing view of one running agent.
@@ -51,6 +65,7 @@ type Agent struct {
 	Exe       string   `json:"exe,omitempty"`
 	Reasons   []string `json:"reasons,omitempty"`
 	Risks     []string `json:"risks,omitempty"`
+	Blocked   bool     `json:"network_blocked,omitempty"`
 }
 
 // Status summarises the daemon's health.
@@ -102,6 +117,7 @@ type Response struct {
 	Events   []auditlog.Record `json:"events,omitempty"`
 	Thermal  *Thermal          `json:"thermal,omitempty"`
 	Sinkhole *Sinkhole         `json:"sinkhole,omitempty"`
+	Egress   *egress.Status    `json:"egress,omitempty"`
 }
 
 // Peer identifies the process on the other end, as reported by the kernel.

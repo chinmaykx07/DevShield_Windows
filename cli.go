@@ -12,6 +12,9 @@
 //	devshield profile              thermal controls, active profile, temps
 //	sudo devshield profile <name>  silent | gaming | dev | off (root only)
 //	devshield sinkhole [on|off]    telemetry sinkhole in /etc/hosts (changes need root)
+//	sudo devshield block <id>      cut one agent off the network (Linux)
+//	devshield egress               network quarantine and lockdown status
+//	sudo devshield lockdown on …   only a tunnel / Tor / chosen users may go out
 
 package main
 
@@ -31,6 +34,7 @@ import (
 
 	"github.com/chinmaykx07/DevShield_Windows/internal/auditlog"
 	"github.com/chinmaykx07/DevShield_Windows/internal/daemon"
+	"github.com/chinmaykx07/DevShield_Windows/internal/egress"
 	"github.com/chinmaykx07/DevShield_Windows/internal/ipc"
 	"github.com/chinmaykx07/DevShield_Windows/internal/sensors"
 )
@@ -51,6 +55,15 @@ Usage:
   sudo devshield profile <name>   silent | gaming | dev | off (off = original settings)
   devshield sinkhole              telemetry sinkhole status and what it blocks
   sudo devshield sinkhole on|off  block / unblock telemetry domains in /etc/hosts
+  devshield egress [--json]       network quarantine and lockdown status
+  sudo devshield block <id>       cut one agent (and its children) off the network
+  sudo devshield unblock <id>     give it its network access back
+  sudo devshield lockdown on [--via IFACE]... [--endpoint IP:PORT/PROTO]...
+                    [--user NAME]... [--tor] [--lan] [--strict] [--confirm-within 2m]
+                                  nothing leaves except through the tunnel, the
+                                  tunnel's servers and the users you name
+  sudo devshield lockdown confirm keep a lockdown started with --confirm-within
+  sudo devshield lockdown off
   devshield version
 
 Global flag (before or after the command): --socket PATH (default ` + ipc.DefaultSocket + `)
@@ -121,6 +134,21 @@ func runCLI(args []string, stdout, stderr io.Writer) int {
 			return 3
 		}
 		return 0
+	case "egress":
+		return cliEgress(cargs, socket, stdout, stderr)
+	case "block", "unblock":
+		if len(cargs) != 1 {
+			fmt.Fprintf(stderr, "usage: sudo devshield %s <agent id>\n", cmd)
+			return 2
+		}
+		resp, ok := call(socket, ipc.Request{Op: cmd, ID: cargs[0]}, stderr)
+		if !ok {
+			return 1
+		}
+		printEgress(resp.Egress, stdout)
+		return 0
+	case "lockdown":
+		return cliLockdown(cargs, socket, stdout, stderr)
 	case "verify-log":
 		path := daemon.DefaultStateDir + "/audit.log"
 		if len(cargs) > 0 {
@@ -242,6 +270,9 @@ func cliAgents(args []string, socket string, stdout, stderr io.Writer) int {
 		if a.Exe != "" {
 			fmt.Fprintf(stdout, "          program: %s\n", a.Exe)
 		}
+		if a.Blocked {
+			fmt.Fprintln(stdout, "          🔒 network blocked")
+		}
 		for _, r := range a.Risks {
 			fmt.Fprintf(stdout, "          ⚠ %s\n", r)
 		}
@@ -249,7 +280,7 @@ func cliAgents(args []string, socket string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stdout, "          why: %s\n", strings.Join(a.Reasons, "; "))
 		}
 	}
-	fmt.Fprintln(stdout, "\nApprove an agent with: sudo devshield sanction <ID>")
+	fmt.Fprintln(stdout, "\nApprove an agent with: sudo devshield sanction <ID>   cut it off with: sudo devshield block <ID>")
 	if alert > 0 {
 		return 3
 	}
@@ -395,4 +426,101 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return string([]rune(s)[:n-1]) + "…"
+}
+
+// multiFlag collects a repeatable flag.
+type multiFlag []string
+
+func (m *multiFlag) String() string     { return strings.Join(*m, ",") }
+func (m *multiFlag) Set(v string) error { *m = append(*m, v); return nil }
+
+func cliLockdown(args []string, socket string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		return cliEgress(nil, socket, stdout, stderr)
+	}
+	mode := args[0]
+	req := ipc.Request{Op: "lockdown", Profile: mode}
+	if mode == "on" {
+		fs := flag.NewFlagSet("lockdown on", flag.ContinueOnError)
+		fs.SetOutput(stderr)
+		var via, eps, users multiFlag
+		fs.Var(&via, "via", "tunnel interface allowed out (repeatable), e.g. wg0")
+		fs.Var(&eps, "endpoint", "tunnel server IP:PORT/PROTO reachable directly (repeatable)")
+		fs.Var(&users, "user", "user (name or uid) allowed out directly, e.g. a VPN client's account (repeatable)")
+		tor := fs.Bool("tor", false, "allow the Tor daemon's user (programs then reach the internet only through Tor)")
+		lan := fs.Bool("lan", false, "also allow the local network (printers, NAS); DNS still must use the tunnel")
+		strict := fs.Bool("strict", false, "also block replies to inbound connections (breaks SSH into this machine)")
+		confirm := fs.Duration("confirm-within", 0, "revert automatically unless 'devshield lockdown confirm' is run in time")
+		if err := fs.Parse(args[1:]); err != nil {
+			return 2
+		}
+		req.Lockdown = &ipc.LockdownRequest{Via: via, Endpoints: eps, Users: users, Tor: *tor,
+			LAN: *lan, Strict: *strict, ConfirmSec: int(confirm.Seconds())}
+	}
+	resp, ok := call(socket, req, stderr)
+	if !ok {
+		return 1
+	}
+	printEgress(resp.Egress, stdout)
+	return 0
+}
+
+func cliEgress(args []string, socket string, stdout, stderr io.Writer) int {
+	resp, ok := call(socket, ipc.Request{Op: "egress"}, stderr)
+	if !ok {
+		return 1
+	}
+	if len(args) > 0 && args[0] == "--json" {
+		b, _ := json.MarshalIndent(resp.Egress, "", "  ")
+		fmt.Fprintln(stdout, string(b))
+	} else {
+		printEgress(resp.Egress, stdout)
+	}
+	if !resp.Egress.RulesLoaded {
+		return 3
+	}
+	return 0
+}
+
+func printEgress(e *egress.Status, stdout io.Writer) {
+	if e == nil {
+		return
+	}
+	if l := e.Lockdown; l != nil {
+		fmt.Fprintln(stdout, "Lockdown: ON — nothing leaves except:")
+		for _, i := range l.Interfaces {
+			fmt.Fprintf(stdout, "  · traffic through %s\n", i)
+		}
+		for _, ep := range l.Endpoints {
+			fmt.Fprintf(stdout, "  · the tunnel server %s\n", ep)
+		}
+		for _, u := range l.Users {
+			fmt.Fprintf(stdout, "  · programs of uid %d\n", u)
+		}
+		if l.AllowLAN {
+			fmt.Fprintln(stdout, "  · the local network (except DNS)")
+		}
+		if !l.NoReplies {
+			fmt.Fprintln(stdout, "  · replies to connections made TO this machine (e.g. SSH); --strict blocks them")
+		}
+		if !e.ConfirmBy.IsZero() {
+			fmt.Fprintf(stdout, "  ⏳ reverts at %s unless you run: sudo devshield lockdown confirm\n", e.ConfirmBy.Local().Format("15:04:05"))
+		}
+	} else {
+		fmt.Fprintln(stdout, "Lockdown: off")
+	}
+	if len(e.Blocked) == 0 {
+		fmt.Fprintln(stdout, "Blocked agents: none")
+	} else {
+		fmt.Fprintf(stdout, "Blocked agents (%d processes quarantined):\n", e.QuarantinedProcs)
+		for _, b := range e.Blocked {
+			fmt.Fprintf(stdout, "  🔒 %-9s %-30s since %s, %d earlier connections cut\n", b.ID, truncate(b.Name, 30), b.Since.Local().Format("2006-01-02 15:04"), b.Flows)
+		}
+	}
+	if !e.CgroupV2 {
+		fmt.Fprintln(stdout, "  note: cgroup v2 is not mounted, so per-agent blocking is unavailable here")
+	}
+	if !e.RulesLoaded {
+		fmt.Fprintln(stdout, "  ⚠ the kernel does not have DevShield's firewall table loaded (the daemon re-applies it within 10 s)")
+	}
 }

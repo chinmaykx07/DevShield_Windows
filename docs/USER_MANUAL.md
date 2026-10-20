@@ -170,6 +170,57 @@ The list is deliberately small and documented, so every entry is a pure telemetr
 - **Your entries are safe.** Your own lines in `/etc/hosts` are never touched, and `off` removes only DevShield's block, keeping edits you made since. A one-time copy of the original file is kept in the root-only state directory.
 - **Status warns you** if the sinkhole can't work: name resolution that ignores `/etc/hosts`, or entries removed by hand. Browsers using DNS-over-HTTPS bypass hosts-file blocking.
 
+**Network controls (Linux): block one agent, or lock the whole machine down**
+
+DevShield writes its rules into its own nftables table (`inet devshield`) and never touches other tables. The rules live in the kernel, so they **keep working if DevShield stops** (fail closed). If another tool removes the table (for example a firewall service running `flush ruleset`), the daemon puts it back within 10 seconds and logs `EGRESS_RULES_RESTORED`. Needs the `nft` tool (package `nftables`).
+
+*Block one agent* (the "Block" step of Block → Allow → Charge):
+
+```bash
+devshield agents                 # find the agent's ID
+sudo devshield block 17d4a1d7    # cut it (and everything it starts) off the network
+devshield egress                 # what is blocked, lockdown state
+sudo devshield unblock 17d4a1d7  # give it its network access back
+```
+
+- Everything else keeps working. Only that agent's processes lose the network, and so does anything they launch (shells, curl, child tools), **loopback included**, so it can't hand traffic to a local proxy.
+- **Connections it already had are cut too.** Those sockets were opened before the block, so DevShield drops them by their exact addresses.
+- **It stays blocked.** If the agent restarts, it is caught again at the next scan (up to about 10 seconds; logged as `AGENT_REQUARANTINED`). The block survives reboots, and you can block an agent that isn't running.
+- Uses a cgroup v2 group (`devshield-quarantine`). Works on unified and on "hybrid" cgroup layouts. If cgroup v2 isn't mounted at all, `devshield egress` says so.
+
+*Lockdown: nothing leaves except the way you choose.* This is the alternative to a Tor-only kill switch, for networks that block Tor:
+
+```bash
+# Only through your WireGuard tunnel (and to its server, so the tunnel can connect):
+sudo devshield lockdown on --via wg0 --endpoint 203.0.113.5:51820/udp
+# Only through Tor (programs reach the internet only via Tor's SOCKS port):
+sudo devshield lockdown on --tor
+# Through any tunnel/proxy client that runs as its own user (obfuscated VPNs, Tor bridges, …):
+sudo devshield lockdown on --user sing-box
+# Keep printers/NAS reachable (DNS still must go through the tunnel):
+sudo devshield lockdown on --via wg0 --endpoint 203.0.113.5:51820/udp --lan
+# Trying a new tunnel? Auto-revert unless you confirm:
+sudo devshield lockdown on --via wg0 --endpoint 203.0.113.5:51820/udp --confirm-within 2m
+sudo devshield lockdown confirm
+sudo devshield lockdown off
+```
+
+- **No leaks around the tunnel.** DNS, IPv6, and programs that ignore proxy settings can't go around it, because nothing else is allowed out. If the tunnel drops, traffic stops instead of falling back to your normal connection.
+- **Telemetry needs your permission.** With the sinkhole on and lockdown on, telemetry from any vendor (operating system, drivers, editors) can only leave through the path you chose, and only if its domain isn't blocked. Every drop is counted, and samples are logged (`devshield-lockdown-drop` in the kernel log).
+- **SSH into this machine keeps working.** Replies to connections someone makes *to* this machine are allowed. `--strict` blocks those too, but it also cuts SSH.
+- Endpoints must be IP addresses: looking up a name would itself need traffic outside the tunnel.
+- When Tor is blocked: any tunnel works with `--via`/`--user`. That includes WireGuard or OpenVPN to a server you control, obfuscated protocols, and Tor with bridges, which still runs as the Tor user. DevShield doesn't get around censorship itself. It makes sure **only** the path you picked is used.
+
+*What these controls cannot stop (the honest list):*
+- **Out-of-band management hardware.** Intel AMT/vPro (and similar features on some business machines) has its own network stack below the operating system. No OS firewall can see that traffic; it has been abused this way in the wild. Turn AMT off in the firmware setup, and/or block TCP 16992–16995 and 623/664 on your router.
+- **Malware that already has root.** It can remove any rule. DevShield notices and restores the table within 10 seconds, and logs it, but root is root.
+- **Data hidden inside traffic you allowed.** If a program is allowed out, DevShield can't tell what it sends.
+- **Programs that set up their own route** through a tunnel you allowed. Lockdown controls *how* traffic leaves, not which program sends it.
+- **Blocking works per process.** An agent that runs *inside* another program, such as an editor extension, shares that program's process. Blocking it also cuts the host program (for example the editor's extension host) off the network.
+- **A gap of up to about 10 seconds** when a blocked agent restarts, until the next scan catches it.
+- **Old-style cgroup v1 network controllers** (net_cls/net_prio) in use on a hybrid system disable the per-agent match. This is rare on modern distributions.
+- **Ask-before-connect, per program (like simplewall or OpenSnitch)**, is not built yet. See the roadmap.
+
 **Install, by hand for now** (packages come later):
 
 ```bash
@@ -179,7 +230,7 @@ echo "DEVSHIELD_OWNER=$USER" | sudo install -D -m 0644 /dev/stdin /etc/devshield
 sudo systemctl daemon-reload && sudo systemctl enable --now devshield
 ```
 
-Status: tested by unit tests and a live run with real users on Linux (owner/other user, a rogue attempting self-sanction, `kill -9`, log tampering). **Not yet tested under systemd itself**, so the unit's hardening settings still need a real-machine check. The sinkhole was tested live on a real Linux system: the resolver returned 0.0.0.0 for blocked domains, update servers kept resolving, and `/etc/hosts` came back byte-for-byte identical after `off`. Sensors and thermal profiles are tested on simulated kernel layouts (Intel/AMD, laptop and desktop) and through the real daemon socket, but **not yet on real hardware**. Privacy, firewall and the tray on Linux come next.
+Status: tested by unit tests and a live run with real users on Linux (owner/other user, a rogue attempting self-sanction, `kill -9`, log tampering). **Not yet tested under systemd itself**, so the unit's hardening settings still need a real-machine check. The sinkhole was tested live on a real Linux system: the resolver returned 0.0.0.0 for blocked domains, update servers kept resolving, and `/etc/hosts` came back byte-for-byte identical after `off`. Sensors and thermal profiles are tested on simulated kernel layouts (Intel/AMD, laptop and desktop) and through the real daemon socket, but **not yet on real hardware**. Network controls were tested live through the real daemon, kernel and nft, in an isolated network namespace with both unified and hybrid cgroup layouts. The tests covered: blocking a running agent and its child (held and new connections stopped, other programs unaffected), re-blocking after a restart, unblocking, lockdown via a tunnel interface, an endpoint or an allowed user, the auto-revert, restoring a deleted table, and keeping lockdown across a daemon restart. They were **not yet** run with a real WireGuard/Tor setup, or under systemd. The Linux tray comes next.
 
 ## 3. Pro Use
 

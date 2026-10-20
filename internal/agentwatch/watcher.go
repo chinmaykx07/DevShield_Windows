@@ -59,6 +59,7 @@ type RunningAgent struct {
 	Verdict     string // sanctioned | unsanctioned | risky | rogue
 	ActiveRisks []string
 	Processes   int
+	PIDs        []int32 // every process of this agent seen in the last scan
 }
 
 type cachedProc struct {
@@ -339,11 +340,12 @@ func mergeDetections(dets []Detection) []RunningAgent {
 			byFP[fp] = len(out)
 			d.Reasons = append([]string(nil), d.Reasons...)
 			d.Risks = append([]string(nil), d.Risks...)
-			out = append(out, RunningAgent{Detection: d, Fingerprint: fp, ID: shortID(fp), Processes: 1})
+			out = append(out, RunningAgent{Detection: d, Fingerprint: fp, ID: shortID(fp), Processes: 1, PIDs: []int32{d.PID}})
 			continue
 		}
 		a := &out[i]
 		a.Processes++
+		a.PIDs = append(a.PIDs, d.PID)
 		if d.AgentScore > a.AgentScore {
 			a.AgentScore = d.AgentScore
 		}

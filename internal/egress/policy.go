@@ -22,6 +22,7 @@ package egress
 import (
 	"fmt"
 	"net"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -43,15 +44,59 @@ type Lockdown struct {
 	NoReplies  bool     `json:"no_replies,omitempty"` // strict: also block replies to inbound connections (breaks SSH into this machine)
 }
 
-// Flow is one existing connection to cut: sockets keep the cgroup they were
-// created in, so connections a process opened BEFORE quarantine are not
-// matched by the cgroup rule and must be dropped by their exact addresses.
+// Flow is one existing socket to cut: sockets keep the cgroup they were
+// created in, so sockets a process opened BEFORE quarantine are not matched
+// by the cgroup rule and must be dropped by address. A connected socket is
+// a full 5-tuple; a listener or unconnected UDP socket has no remote side
+// (RemoteIP "" and RemotePort 0) and is matched by its local port — and
+// local IP when bound to one.
 type Flow struct {
 	Proto      string `json:"proto"` // tcp | udp
-	LocalIP    string `json:"local_ip"`
+	LocalIP    string `json:"local_ip,omitempty"`
 	LocalPort  int    `json:"local_port"`
-	RemoteIP   string `json:"remote_ip"`
-	RemotePort int    `json:"remote_port"`
+	RemoteIP   string `json:"remote_ip,omitempty"`
+	RemotePort int    `json:"remote_port,omitempty"`
+}
+
+// rule renders f as nft match expressions, validating every field.
+func (f Flow) rule() (string, error) {
+	bad := fmt.Errorf("invalid flow %+v", f)
+	if (f.Proto != "tcp" && f.Proto != "udp") || f.LocalPort < 1 || f.LocalPort > 65535 ||
+		f.RemotePort < 0 || f.RemotePort > 65535 || (f.RemoteIP == "") != (f.RemotePort == 0) {
+		return "", bad
+	}
+	fam := ""
+	var parts []string
+	addr := func(dir, s string) error {
+		if s == "" {
+			return nil
+		}
+		ip := net.ParseIP(s)
+		if ip == nil {
+			return bad
+		}
+		this := "ip"
+		if ip.To4() == nil {
+			this = "ip6"
+		}
+		if fam != "" && fam != this {
+			return bad // mixed families
+		}
+		fam = this
+		parts = append(parts, fmt.Sprintf("%s %s %s", fam, dir, ip))
+		return nil
+	}
+	if err := addr("saddr", f.LocalIP); err != nil {
+		return "", err
+	}
+	parts = append(parts, fmt.Sprintf("%s sport %d", f.Proto, f.LocalPort))
+	if err := addr("daddr", f.RemoteIP); err != nil {
+		return "", err
+	}
+	if f.RemotePort != 0 {
+		parts = append(parts, fmt.Sprintf("%s dport %d", f.Proto, f.RemotePort))
+	}
+	return strings.Join(parts, " "), nil
 }
 
 // Policy is the full egress configuration.
@@ -59,6 +104,9 @@ type Policy struct {
 	Quarantine bool      `json:"quarantine"` // install the quarantine rule (cgroup v2 present)
 	KillFlows  []Flow    `json:"kill_flows,omitempty"`
 	Lockdown   *Lockdown `json:"lockdown,omitempty"`
+	// CgroupPath is the quarantine group relative to /sys/fs/cgroup, as nft
+	// resolves it ("" = QuarantineCgroup; hybrid systems: "unified/…").
+	CgroupPath string `json:"-"`
 	// SkipLoopback is for tests only: lockdown normally always allows lo.
 	SkipLoopback bool `json:"-"`
 }
@@ -158,21 +206,24 @@ func Render(p Policy) (string, error) {
 	if p.Quarantine {
 		// First rule: quarantined processes get nothing, loopback included
 		// (a local proxy could otherwise carry their traffic out).
-		fmt.Fprintf(&b, "\t\tsocket cgroupv2 level 1 %q counter drop comment \"devshield quarantine\"\n", QuarantineCgroup)
+		path := p.CgroupPath
+		if path == "" {
+			path = QuarantineCgroup
+		}
+		if strings.ContainsAny(path, "\"\\\n") || strings.HasPrefix(path, "..") || filepath.Base(path) != QuarantineCgroup {
+			return "", fmt.Errorf("unexpected quarantine cgroup path %q", path)
+		}
+		// The group sits directly under the hierarchy root (level 1) wherever
+		// the hierarchy is mounted.
+		fmt.Fprintf(&b, "\t\tsocket cgroupv2 level 1 %q counter drop comment \"devshield quarantine\"\n", path)
 	}
 
 	for _, f := range p.KillFlows {
-		lip, rip := net.ParseIP(f.LocalIP), net.ParseIP(f.RemoteIP)
-		if lip == nil || rip == nil || (f.Proto != "tcp" && f.Proto != "udp") || f.LocalPort < 1 || f.RemotePort < 1 ||
-			f.LocalPort > 65535 || f.RemotePort > 65535 || (lip.To4() == nil) != (rip.To4() == nil) {
-			return "", fmt.Errorf("invalid flow %+v", f)
+		r, err := f.rule()
+		if err != nil {
+			return "", err
 		}
-		fam := "ip"
-		if lip.To4() == nil {
-			fam = "ip6"
-		}
-		fmt.Fprintf(&b, "\t\t%s saddr %s %s sport %d %s daddr %s %s dport %d counter drop comment \"quarantined connection\"\n",
-			fam, lip, f.Proto, f.LocalPort, fam, rip, f.Proto, f.RemotePort)
+		fmt.Fprintf(&b, "\t\t%s counter drop comment \"quarantined socket\"\n", r)
 	}
 
 	if l := p.Lockdown; l != nil {
@@ -206,6 +257,10 @@ func Render(p Policy) (string, error) {
 		b.WriteString("\t\tudp dport { 67, 547 } accept comment \"dhcp\"\n")
 		b.WriteString("\t\ticmpv6 type { nd-router-solicit, nd-neighbor-solicit, nd-neighbor-advert } accept comment \"ipv6 neighbour discovery\"\n")
 		if l.AllowLAN {
+			// The LAN router is usually also the DNS resolver: name lookups
+			// must go through the tunnel, never in clear to the local network.
+			b.WriteString("\t\tudp dport 53 drop comment \"no DNS outside the tunnel\"\n")
+			b.WriteString("\t\ttcp dport { 53, 853 } drop comment \"no DNS outside the tunnel\"\n")
 			b.WriteString("\t\tip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 224.0.0.0/4, 255.255.255.255 } accept comment \"local network\"\n")
 			b.WriteString("\t\tip6 daddr { fe80::/10, fc00::/7, ff00::/8 } accept comment \"local network\"\n")
 		}

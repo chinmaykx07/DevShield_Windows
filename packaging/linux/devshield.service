@@ -4,7 +4,8 @@
 #
 # Configure the owner (who may READ status/agents/events without sudo) in
 # /etc/devshield/daemon.env:   DEVSHIELD_OWNER=alice
-# Changing policy (sanction/revoke) always requires root: sudo devshield …
+# Changing policy (sanction/revoke/block/lockdown/…) always requires root:
+# sudo devshield …   Network controls need the nft tool (package nftables).
 [Unit]
 Description=DevShield daemon — keeps this machine under its owner's control
 Documentation=https://github.com/chinmaykx07/DevShield_Windows/blob/main/docs/USER_MANUAL.md
@@ -26,12 +27,16 @@ UMask=0077
 # ── Hardening ───────────────────────────────────────────────────────────
 # Only what Agent Watch needs: read every process's environment, loaded
 # libraries and executable (CAP_SYS_PTRACE), and read users' autostart
-# files (CAP_DAC_READ_SEARCH). Thermal profiles write root-owned files in
-# /sys, which needs no extra capability. Later phases (firewall) will add
-# exactly the capabilities they need, nothing more.
-CapabilityBoundingSet=CAP_SYS_PTRACE CAP_DAC_READ_SEARCH
+# files (CAP_DAC_READ_SEARCH). Network quarantine/lockdown load DevShield's
+# own nftables table (CAP_NET_ADMIN). Thermal profiles and moving a blocked
+# agent into the quarantine cgroup write root-owned files, which needs no
+# extra capability.
+CapabilityBoundingSet=CAP_SYS_PTRACE CAP_DAC_READ_SEARCH CAP_NET_ADMIN
 NoNewPrivileges=yes
 ProtectSystem=strict
+# The one file outside the state directory DevShield edits (the telemetry
+# sinkhole's managed block); everything else under /etc stays read-only.
+ReadWritePaths=/etc/hosts
 ProtectHome=read-only
 # No PrivateTmp: rogue agents often live in /tmp, and the daemon must see
 # (and hash) the real files there.
@@ -41,7 +46,9 @@ ProtectHome=read-only
 # writable while keeping the rest of the OS read-only.
 ProtectKernelModules=yes
 ProtectKernelLogs=yes
-ProtectControlGroups=yes
+# ProtectControlGroups is deliberately NOT set: it makes /sys/fs/cgroup
+# read-only, and "devshield block" must create the devshield-quarantine
+# group and move the agent's processes into it.
 ProtectClock=yes
 ProtectHostname=yes
 RestrictSUIDSGID=yes

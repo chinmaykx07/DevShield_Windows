@@ -34,6 +34,21 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   user entries preserved; re-apply always writes the full list; status
   flags missing entries and resolvers that ignore /etc/hosts. Verified
   live on a real resolver.
+- Linux network controls (`internal/egress`), in DevShield's own nftables
+  table, enforced in the kernel (fail closed):
+  `sudo devshield block|unblock <agent>` cuts one agent and everything it
+  spawns off the network (loopback included) through a cgroup v2 group.
+  Its pre-existing connections and listeners are dropped by address, and
+  it is re-quarantined after a restart.
+  `sudo devshield lockdown on --via IFACE | --endpoint IP:PORT/PROTO |
+  --user NAME | --tor [--lan] [--strict] [--confirm-within D]` allows
+  outbound traffic only through the chosen tunnel/users. This is a Tor
+  kill switch and its alternative for networks that block Tor: no DNS or
+  IPv6 leaks, DNS never goes to the LAN, and replies to inbound SSH still
+  work unless `--strict` is set. There is a dead-man auto-revert. A
+  removed table is restored within 10 s and logged. Tested live in
+  network namespaces (unified and hybrid cgroups); not yet with a real
+  VPN/Tor setup or under systemd.
 - Tamper-evident, hash-chained audit log: edits, deletions, reordering and
   truncation are detected; unclean daemon stops are reported.
 
@@ -46,6 +61,10 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   35 to 0. CI now runs vet, race tests and govulncheck on Linux and Windows.
 
 ### Fixed
+- systemd unit: `ProtectSystem=strict` left `/etc/hosts` read-only, so the
+  sinkhole could not have worked under systemd. It is now the one
+  `ReadWritePaths` entry. `ProtectControlGroups` is dropped (quarantine
+  writes `/sys/fs/cgroup`) and `CAP_NET_ADMIN` added (nftables).
 - App froze on Quit (`closeAudit` self-deadlock on `auditMu`).
 
 ### Pending before v0.1.0 tag

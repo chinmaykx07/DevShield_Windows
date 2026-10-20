@@ -44,6 +44,14 @@ func TestRenderLockdown(t *testing.T) {
 	}
 }
 
+func TestLANDoesNotLeakDNS(t *testing.T) {
+	s, _ := Render(Policy{Lockdown: &Lockdown{Interfaces: []string{"wg0"}, AllowLAN: true}})
+	dns, lan := strings.Index(s, "udp dport 53 drop"), strings.Index(s, "10.0.0.0/8")
+	if dns < 0 || lan < 0 || dns > lan || strings.Index(s, `oifname "wg0"`) > dns {
+		t.Fatalf("DNS must be dropped after the tunnel accept and before the LAN accept:\n%s", s)
+	}
+}
+
 func TestStrictLockdownBlocksReplies(t *testing.T) {
 	s, _ := Render(Policy{Lockdown: &Lockdown{Interfaces: []string{"wg0"}, NoReplies: true}})
 	if strings.Contains(s, "ct direction reply") {
@@ -59,16 +67,30 @@ func TestQuarantineRuleComesFirst(t *testing.T) {
 	}
 }
 
+func TestHybridCgroupPath(t *testing.T) {
+	s, err := Render(Policy{Quarantine: true, CgroupPath: "unified/devshield-quarantine"})
+	if err != nil || !strings.Contains(s, `socket cgroupv2 level 1 "unified/devshield-quarantine"`) {
+		t.Fatalf("hybrid path not rendered (%v):\n%s", err, s)
+	}
+	for _, bad := range []string{"../etc", `x" accept`, "unified/other"} {
+		if _, err := Render(Policy{Quarantine: true, CgroupPath: bad}); err == nil {
+			t.Errorf("accepted cgroup path %q", bad)
+		}
+	}
+}
+
 func TestRenderKillFlows(t *testing.T) {
 	s, err := Render(Policy{KillFlows: []Flow{
 		{Proto: "tcp", LocalIP: "10.0.0.2", LocalPort: 51000, RemoteIP: "160.79.104.10", RemotePort: 443},
 		{Proto: "udp", LocalIP: "2001:db8::2", LocalPort: 5353, RemoteIP: "2001:db8::53", RemotePort: 53},
+		{Proto: "tcp", LocalPort: 8080}, // listener on all addresses
 	}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(s, "ip saddr 10.0.0.2 tcp sport 51000 ip daddr 160.79.104.10 tcp dport 443 counter drop") ||
-		!strings.Contains(s, "ip6 saddr 2001:db8::2 udp sport 5353 ip6 daddr 2001:db8::53 udp dport 53 counter drop") {
+		!strings.Contains(s, "ip6 saddr 2001:db8::2 udp sport 5353 ip6 daddr 2001:db8::53 udp dport 53 counter drop") ||
+		!strings.Contains(s, "\ttcp sport 8080 counter drop") {
 		t.Fatalf("flows not rendered:\n%s", s)
 	}
 }
@@ -82,6 +104,8 @@ func TestValidationRejectsUnsafeInput(t *testing.T) {
 		{Lockdown: &Lockdown{Interfaces: []string{"wg0"}, Endpoints: []string{"203.0.113.5:443/icmp"}}},
 		{KillFlows: []Flow{{Proto: "tcp", LocalIP: "10.0.0.2", LocalPort: 1, RemoteIP: "2001:db8::1", RemotePort: 2}}}, // mixed families
 		{KillFlows: []Flow{{Proto: "tcp", LocalIP: "not-an-ip", LocalPort: 1, RemoteIP: "1.2.3.4", RemotePort: 2}}},
+		{KillFlows: []Flow{{Proto: "tcp", LocalPort: 1, RemoteIP: "1.2.3.4"}}}, // remote IP without port
+		{KillFlows: []Flow{{Proto: "tcp", LocalPort: 0}}},
 	}
 	for i, p := range bad {
 		if _, err := Render(p); err == nil {

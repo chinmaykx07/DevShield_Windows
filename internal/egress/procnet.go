@@ -26,6 +26,7 @@ type Socket struct {
 const (
 	tcpEstablished = "01"
 	tcpSynSent     = "02"
+	tcpListen      = "0A"
 )
 
 // parseProcNet parses the kernel's socket table text.
@@ -110,8 +111,10 @@ func socketInodes(procRoot string, pid int) map[uint64]bool {
 	return out
 }
 
-// OpenFlows lists the connected (non-listening, non-loopback-wildcard)
-// flows owned by any of pids, for cutting on quarantine.
+// OpenFlows lists the sockets owned by any of pids, as flows to cut on
+// quarantine: connected sockets by 5-tuple, listeners and unconnected UDP
+// sockets by local address (connections accepted later on an old listener
+// would otherwise inherit its pre-quarantine cgroup).
 func OpenFlows(procRoot string, pids []int) []Flow {
 	owned := map[uint64]bool{}
 	for _, pid := range pids {
@@ -125,14 +128,21 @@ func OpenFlows(procRoot string, pids []int) []Flow {
 	var out []Flow
 	seen := map[Flow]bool{}
 	for _, s := range readSockets(procRoot) {
-		if !owned[s.Inode] || s.RemotePort == 0 || s.RemoteIP.IsUnspecified() {
-			continue // listening or unconnected
-		}
-		if s.Proto == "tcp" && s.State != tcpEstablished && s.State != tcpSynSent {
+		if !owned[s.Inode] || s.LocalPort == 0 {
 			continue
 		}
-		f := Flow{Proto: s.Proto, LocalIP: s.LocalIP.String(), LocalPort: s.LocalPort,
-			RemoteIP: s.RemoteIP.String(), RemotePort: s.RemotePort}
+		f := Flow{Proto: s.Proto, LocalPort: s.LocalPort}
+		if !s.LocalIP.IsUnspecified() {
+			f.LocalIP = s.LocalIP.String()
+		}
+		connected := s.RemotePort != 0 && !s.RemoteIP.IsUnspecified()
+		switch {
+		case connected && (s.Proto == "udp" || s.State == tcpEstablished || s.State == tcpSynSent):
+			f.RemoteIP, f.RemotePort = s.RemoteIP.String(), s.RemotePort
+		case !connected && (s.Proto == "udp" || s.State == tcpListen):
+		default:
+			continue // closing / time-wait: nothing left to send
+		}
 		if !seen[f] {
 			seen[f] = true
 			out = append(out, f)
