@@ -1,4 +1,4 @@
-package main
+package agentwatch
 
 import (
 	"database/sql"
@@ -348,26 +348,40 @@ func TestSpawnTrackerAttributesToolsThroughShells(t *testing.T) {
 	}
 }
 
-func TestLLMEnvHitsIgnoresInheritedGlobals(t *testing.T) {
+// A key in the user's environment is inherited by all their processes and
+// must not flag them; a key set for one process is a signal. Values are
+// never stored, only short hashes.
+func TestLLMEnvBaselinePerUser(t *testing.T) {
 	c := mustCatalog(t)
-	baseline := envBaseline([]string{"OPENAI_API_KEY=sk-global", "PATH=x"})
+	global := llmEnvValues([]string{"OPENAI_API_KEY=sk-alice-global", "PATH=/bin"}, c.LLMEnvVars)
+	special := llmEnvValues([]string{"OPENAI_API_KEY=sk-other", "LITELLM_PROXY=1", "EMPTY_KEY="}, c.LLMEnvVars)
 
-	inherited := []string{"OPENAI_API_KEY=sk-global", "PATH=x"}
-	if hits := llmEnvHits(inherited, baseline, c.LLMEnvVars); len(hits) != 0 {
-		t.Errorf("inherited global key counted: %v", hits)
-	}
-
-	specific := []string{"OPENAI_API_KEY=sk-other", "LITELLM_PROXY=1", "ANTHROPIC_BASE_URL=http://10.0.0.5", "EMPTY_KEY="}
-	hits := llmEnvHits(specific, baseline, c.LLMEnvVars)
-	for _, want := range []string{"OPENAI_API_KEY", "LITELLM_PROXY", "ANTHROPIC_BASE_URL"} {
-		if !containsString(hits, want) {
-			t.Errorf("missing %s in %v", want, hits)
+	for name, h := range special {
+		if strings.Contains(h, "sk-") || len(h) != 16 {
+			t.Fatalf("value not hashed for %s: %q", name, h)
 		}
 	}
-	for _, h := range hits {
-		if strings.Contains(h, "sk-") || strings.Contains(h, "10.0.0.5") {
-			t.Errorf("env value leaked into hits: %v", hits)
-		}
+	if _, ok := special["EMPTY_KEY"]; ok {
+		t.Fatal("non-LLM variable captured")
+	}
+
+	var procs []procEnv
+	for i := 0; i < 5; i++ {
+		procs = append(procs, procEnv{User: "alice", Vars: global})
+	}
+	procs = append(procs, procEnv{User: "alice", Vars: special}, procEnv{User: "bob", Vars: global})
+	base := userBaselines(procs)
+
+	if hits := envHitsAgainst(global, base["alice"]); len(hits) != 0 {
+		t.Errorf("alice's inherited key flagged: %v", hits)
+	}
+	hits := envHitsAgainst(special, base["alice"])
+	if !containsString(hits, "OPENAI_API_KEY") || !containsString(hits, "LITELLM_PROXY") {
+		t.Errorf("process-specific keys not flagged: %v", hits)
+	}
+	// bob has a single process: too few to call anything "inherited"
+	if hits := envHitsAgainst(global, base["bob"]); len(hits) != 1 {
+		t.Errorf("bob baseline should be empty, hits=%v", hits)
 	}
 }
 
@@ -434,7 +448,7 @@ func TestSightingLifecycle(t *testing.T) {
 
 	step := func(hash string, wantChange SightingChange, wantStatus string) {
 		t.Helper()
-		change, status, err := recordSighting(db, d, hash, nowISO())
+		change, status, err := recordSighting(db, d, hash, time.Now().UTC().Format(time.RFC3339))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -446,8 +460,8 @@ func TestSightingLifecycle(t *testing.T) {
 
 	step("aaa", SightingNew, AgentUnsanctioned)        // first sighting
 	step("aaa", SightingSeenBefore, AgentUnsanctioned) // same binary
-	if err := setAgentStatus(db, fp, AgentSanctioned); err != nil {
-		t.Fatal(err)
+	if n, err := setAgentStatus(db, fp, AgentSanctioned); err != nil || n != 1 {
+		t.Fatalf("setAgentStatus: n=%d err=%v", n, err)
 	}
 	step("aaa", SightingSeenBefore, AgentSanctioned)    // approval sticks
 	step("", SightingSeenBefore, AgentSanctioned)       // unreadable file is not a change

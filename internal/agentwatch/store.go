@@ -12,7 +12,7 @@
 // Functions take *sql.DB explicitly so they can be tested against a
 // throwaway database.
 
-package main
+package agentwatch
 
 import (
 	"database/sql"
@@ -109,9 +109,12 @@ func recordSighting(db *sql.DB, d Detection, hash, now string) (SightingChange, 
 }
 
 // setAgentStatus records the user's sanction decision.
-func setAgentStatus(db *sql.DB, fingerprint, status string) error {
-	_, err := db.Exec(`UPDATE agents SET status = ? WHERE fingerprint = ?`, status, fingerprint)
-	return err
+func setAgentStatus(db *sql.DB, fingerprint, status string) (int64, error) {
+	res, err := db.Exec(`UPDATE agents SET status = ? WHERE fingerprint = ?`, status, fingerprint)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 // listAgents returns every agent ever seen, most recently seen first.

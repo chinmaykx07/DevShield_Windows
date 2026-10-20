@@ -1,4 +1,4 @@
-// agentwatch_collect.go — Agent Watch scanner (runs inside the tray)
+// watcher.go — Agent Watch scanner (runs in the root daemon on Linux, in the tray on Windows)
 //
 // Two loops:
 //   fast tick (0.5s) — cheap process list → remembers which tools/shells each
@@ -17,7 +17,7 @@
 // Alert only: Agent Watch never kills or blocks a process. No admin needed;
 // processes of other users / elevated processes are only partly visible.
 
-package main
+package agentwatch
 
 import (
 	"crypto/sha256"
@@ -54,6 +54,7 @@ const (
 type RunningAgent struct {
 	Detection
 	Fingerprint string
+	ID          string // short stable id for humans (first 8 hex of sha256(fingerprint))
 	Status      string // sanction status from the store
 	Verdict     string // sanctioned | unsanctioned | risky | rogue
 	ActiveRisks []string
@@ -63,7 +64,8 @@ type RunningAgent struct {
 type cachedProc struct {
 	createTime int64
 	info       ProcInfo
-	envHits    []string
+	envLLM     map[string]string // LLM env var name → short hash of its value (never the value)
+	envRead    bool              // environment was readable
 	modules    []string
 	modulesAt  time.Time
 }
@@ -74,7 +76,23 @@ type hashEntry struct {
 	sum     string
 }
 
-type AgentWatcher struct {
+// Config wires a Watcher to its surroundings.
+type Config struct {
+	// DB stores sightings and sanction decisions. In the Linux daemon it is a
+	// root-only database, so an agent running as the user cannot sanction
+	// itself. nil keeps everything in memory (every agent unsanctioned).
+	DB *sql.DB
+	// Emit receives audit events (action, detail, status). nil discards them.
+	Emit func(action, detail, status string)
+	// CatalogOverride is an optional catalog file that replaces the built-in
+	// one. It must only be writable by a trusted user (root in the daemon).
+	CatalogOverride string
+}
+
+// Watcher scans processes for AI agents and judges them.
+type Watcher struct {
+	cfg Config
+
 	mu        sync.RWMutex
 	catalog   *AgentCatalog
 	running   []RunningAgent
@@ -85,71 +103,73 @@ type AgentWatcher struct {
 	autostart   map[string]string
 	autostartAt time.Time
 
-	envBase   map[string]string
+	ownEnv    map[string]string // our own LLM env (name → value hash)
 	procCache map[int32]cachedProc
 	hashCache map[string]hashEntry
 	spawns    *spawnTracker
 	alerted   map[string]string // fingerprint → verdict+risks last alerted
 
-	stopCh chan struct{}
+	stopOnce sync.Once
+	stopCh   chan struct{}
 }
 
-var agentWatch = &AgentWatcher{
-	procCache: map[int32]cachedProc{},
-	hashCache: map[string]hashEntry{},
-	llmIPs:    map[string]string{},
-	autostart: map[string]string{},
-	spawns:    newSpawnTracker(spawnWindow),
-	alerted:   map[string]string{},
-	stopCh:    make(chan struct{}),
-}
-
-// ── INIT / SHUTDOWN ───────────────────────────────────────────
-
-func initAgentWatch() {
-	cat, err := LoadAgentCatalog()
-	if err != nil {
-		log.Printf("agentwatch: catalog warning: %v", err)
-		WriteGoEvent("AGENT_CATALOG_WARNING", err.Error(), "warn")
+// New loads the catalog and prepares the store. Call Start to begin scanning.
+// A broken catalog override is reported through Emit and the built-in
+// catalog is used instead.
+func New(cfg Config) (*Watcher, error) {
+	w := &Watcher{
+		cfg:       cfg,
+		procCache: map[int32]cachedProc{},
+		hashCache: map[string]hashEntry{},
+		llmIPs:    map[string]string{},
+		autostart: map[string]string{},
+		spawns:    newSpawnTracker(spawnWindow),
+		alerted:   map[string]string{},
+		stopCh:    make(chan struct{}),
 	}
+	cat, err := LoadAgentCatalog(cfg.CatalogOverride)
 	if cat == nil {
-		log.Printf("agentwatch: disabled — no usable catalog")
-		return
+		return nil, err
 	}
-
-	if db := agentDB(); db != nil {
-		if err := ensureAgentSchema(db); err != nil {
-			log.Printf("agentwatch: schema: %v", err)
+	if err != nil {
+		w.emit("AGENT_CATALOG_WARNING", err.Error(), "warn")
+	}
+	if cfg.DB != nil {
+		if err := ensureAgentSchema(cfg.DB); err != nil {
+			return nil, fmt.Errorf("agentwatch: schema: %w", err)
 		}
 	}
-
-	agentWatch.mu.Lock()
-	agentWatch.catalog = cat
-	agentWatch.envBase = envBaseline(os.Environ())
-	agentWatch.mu.Unlock()
-
-	go agentWatch.runSpawnTicker()
-	go agentWatch.run()
-	log.Printf("agentwatch: started (catalog %s, %d agents)", cat.Version, len(cat.Agents))
+	w.catalog = cat
+	w.ownEnv = llmEnvValues(os.Environ(), cat.LLMEnvVars)
+	return w, nil
 }
 
-func shutdownAgentWatch() {
-	select {
-	case <-agentWatch.stopCh:
-	default:
-		close(agentWatch.stopCh)
+// Start begins the fast spawn tick and the periodic scan.
+func (w *Watcher) Start() {
+	go w.runSpawnTicker()
+	go w.run()
+	log.Printf("agentwatch: started (catalog %s, %d agents)", w.catalog.Version, len(w.catalog.Agents))
+}
+
+// Stop ends scanning. Safe to call more than once.
+func (w *Watcher) Stop() {
+	w.stopOnce.Do(func() { close(w.stopCh) })
+}
+
+// Catalog returns the catalog in use.
+func (w *Watcher) Catalog() *AgentCatalog { return w.catalog }
+
+func (w *Watcher) emit(action, detail, status string) {
+	if w.cfg.Emit != nil {
+		w.cfg.Emit(action, detail, status)
 	}
 }
 
-func agentDB() *sql.DB {
-	auditMu.RLock()
-	defer auditMu.RUnlock()
-	return auditDB
-}
+func nowISO() string { return time.Now().UTC().Format(time.RFC3339) }
 
 // ── LOOPS ─────────────────────────────────────────────────────
 
-func (w *AgentWatcher) runSpawnTicker() {
+func (w *Watcher) runSpawnTicker() {
 	ticker := time.NewTicker(spawnTickInterval)
 	defer ticker.Stop()
 	for {
@@ -169,7 +189,7 @@ func (w *AgentWatcher) runSpawnTicker() {
 	}
 }
 
-func (w *AgentWatcher) run() {
+func (w *Watcher) run() {
 	w.scan()
 
 	ticker := time.NewTicker(agentScanInterval)
@@ -186,7 +206,7 @@ func (w *AgentWatcher) run() {
 	}
 }
 
-func (w *AgentWatcher) scan() {
+func (w *Watcher) scan() {
 	w.mu.RLock()
 	cat := w.catalog
 	w.mu.RUnlock()
@@ -211,7 +231,7 @@ func (w *AgentWatcher) scan() {
 	w.mu.RUnlock()
 
 	running := mergeDetections(cat.Classify(snap, llmIPs))
-	db := agentDB()
+	db := w.cfg.DB
 	now := nowISO()
 
 	for i := range running {
@@ -232,12 +252,12 @@ func (w *AgentWatcher) scan() {
 		switch change {
 		case SightingNew:
 			if a.Known {
-				WriteGoEvent("AGENT_NEW", agentDetail(a), "warn")
+				w.emit("AGENT_NEW", agentDetail(a), "warn")
 			} else {
-				WriteGoEvent("AGENT_UNKNOWN", agentDetail(a), "warn")
+				w.emit("AGENT_UNKNOWN", agentDetail(a), "warn")
 			}
 		case SightingHashChanged:
-			WriteGoEvent("AGENT_CHANGED", agentDetail(a), "warn")
+			w.emit("AGENT_CHANGED", agentDetail(a), "warn")
 		}
 
 		w.alertVerdict(a, prev[a.Fingerprint])
@@ -271,7 +291,7 @@ func (w *AgentWatcher) scan() {
 // alertVerdict raises a verdict alert once per (agent, verdict, risk set),
 // so a rogue agent that keeps running doesn't flood the log, but a NEW
 // risk on the same agent alerts again.
-func (w *AgentWatcher) alertVerdict(a *RunningAgent, wasRunning bool) {
+func (w *Watcher) alertVerdict(a *RunningAgent, wasRunning bool) {
 	key := a.Verdict + "|" + strings.Join(a.ActiveRisks, "|")
 	if w.alerted[a.Fingerprint] == key {
 		return
@@ -280,14 +300,19 @@ func (w *AgentWatcher) alertVerdict(a *RunningAgent, wasRunning bool) {
 
 	switch a.Verdict {
 	case VerdictRogue:
-		WriteGoEvent("AGENT_ROGUE_SUSPECT", agentDetail(a), "warn")
+		w.emit("AGENT_ROGUE_SUSPECT", agentDetail(a), "warn")
 	case VerdictRisky:
-		WriteGoEvent("AGENT_RISKY", agentDetail(a), "warn")
+		w.emit("AGENT_RISKY", agentDetail(a), "warn")
 	case VerdictUnsanctioned:
 		if !wasRunning {
-			WriteGoEvent("AGENT_UNSANCTIONED_START", agentDetail(a), "warn")
+			w.emit("AGENT_UNSANCTIONED_START", agentDetail(a), "warn")
 		}
 	}
+}
+
+func shortID(fingerprint string) string {
+	sum := sha256.Sum256([]byte(fingerprint))
+	return hex.EncodeToString(sum[:4])
 }
 
 // hashTarget picks the file whose change should revoke approval: the
@@ -314,7 +339,7 @@ func mergeDetections(dets []Detection) []RunningAgent {
 			byFP[fp] = len(out)
 			d.Reasons = append([]string(nil), d.Reasons...)
 			d.Risks = append([]string(nil), d.Risks...)
-			out = append(out, RunningAgent{Detection: d, Fingerprint: fp, Processes: 1})
+			out = append(out, RunningAgent{Detection: d, Fingerprint: fp, ID: shortID(fp), Processes: 1})
 			continue
 		}
 		a := &out[i]
@@ -374,14 +399,13 @@ func agentDetail(a *RunningAgent) string {
 
 // ── COLLECTION ────────────────────────────────────────────────
 
-func (w *AgentWatcher) collect(cat *AgentCatalog) (Snapshot, error) {
+func (w *Watcher) collect(cat *AgentCatalog) (Snapshot, error) {
 	procs, err := process.Processes()
 	if err != nil {
 		return Snapshot{}, err
 	}
 
 	w.mu.RLock()
-	envBase := w.envBase
 	autostart := w.autostart
 	w.mu.RUnlock()
 
@@ -416,7 +440,8 @@ func (w *AgentWatcher) collect(cat *AgentCatalog) (Snapshot, error) {
 			c.info.Cmdline, _ = p.Cmdline()
 			c.info.User, _ = p.Username()
 			if env, err := p.Environ(); err == nil {
-				c.envHits = llmEnvHits(env, envBase, cat.LLMEnvVars)
+				c.envLLM = llmEnvValues(env, cat.LLMEnvVars)
+				c.envRead = true
 			}
 		}
 		// Libraries load lazily, so module lists are refreshed periodically,
@@ -431,7 +456,6 @@ func (w *AgentWatcher) collect(cat *AgentCatalog) (Snapshot, error) {
 
 		snap.Procs = append(snap.Procs, c.info)
 		snap.Behavior[p.Pid] = &ProcBehavior{
-			EnvHits:    c.envHits,
 			Modules:    c.modules,
 			ToolSpawns: w.spawns.recent(p.Pid),
 		}
@@ -439,6 +463,22 @@ func (w *AgentWatcher) collect(cat *AgentCatalog) (Snapshot, error) {
 	for pid := range w.procCache {
 		if !seen[pid] {
 			delete(w.procCache, pid)
+		}
+	}
+
+	// LLM keys that most of a user's processes share were inherited from
+	// that user's environment and say nothing about any one process. Only
+	// keys set for a particular process count as a signal.
+	envs := make([]procEnv, 0, len(w.procCache))
+	for _, c := range w.procCache {
+		if c.envRead {
+			envs = append(envs, procEnv{User: c.info.User, Vars: c.envLLM})
+		}
+	}
+	baselines := userBaselines(envs)
+	for pid, c := range w.procCache {
+		if b := snap.Behavior[pid]; b != nil && len(c.envLLM) > 0 {
+			b.EnvHits = envHitsAgainst(c.envLLM, baselines[c.info.User], w.ownEnv)
 		}
 	}
 
@@ -462,7 +502,7 @@ func (w *AgentWatcher) collect(cat *AgentCatalog) (Snapshot, error) {
 // refreshLLMIPs resolves the catalog's LLM API hosts so connections can be
 // matched by IP. Shared CDN IPs make this a weak signal on its own, which
 // is why it only adds 2 points in agentScore.
-func (w *AgentWatcher) refreshLLMIPs(cat *AgentCatalog) {
+func (w *Watcher) refreshLLMIPs(cat *AgentCatalog) {
 	w.mu.RLock()
 	fresh := time.Since(w.resolvedAt) < llmResolveInterval
 	w.mu.RUnlock()
@@ -489,7 +529,7 @@ func (w *AgentWatcher) refreshLLMIPs(cat *AgentCatalog) {
 	w.mu.Unlock()
 }
 
-func (w *AgentWatcher) refreshAutostart() {
+func (w *Watcher) refreshAutostart() {
 	w.mu.RLock()
 	fresh := time.Since(w.autostartAt) < autostartInterval
 	w.mu.RUnlock()
@@ -504,7 +544,7 @@ func (w *AgentWatcher) refreshAutostart() {
 }
 
 // hashFile returns the SHA-256 of a file, cached by size + mtime.
-func (w *AgentWatcher) hashFile(path string) string {
+func (w *Watcher) hashFile(path string) string {
 	if path == "" {
 		return ""
 	}
@@ -535,53 +575,85 @@ func (w *AgentWatcher) hashFile(path string) string {
 // verdictRank orders the menu: rogue first, then risky, unsanctioned, sanctioned.
 var verdictRank = map[string]int{VerdictRogue: 0, VerdictRisky: 1, VerdictUnsanctioned: 2, VerdictSanctioned: 3}
 
-// RunningAgents returns the agents seen in the latest scan, most urgent first.
-func RunningAgents() []RunningAgent {
-	agentWatch.mu.RLock()
-	defer agentWatch.mu.RUnlock()
-	out := make([]RunningAgent, len(agentWatch.running))
-	copy(out, agentWatch.running)
+// Running returns the agents seen in the latest scan, most urgent first.
+func (w *Watcher) Running() []RunningAgent {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	out := make([]RunningAgent, len(w.running))
+	copy(out, w.running)
 	sort.SliceStable(out, func(i, j int) bool {
 		return verdictRank[out[i].Verdict] < verdictRank[out[j].Verdict]
 	})
 	return out
 }
 
-// SanctionAgent records the user's approval of one agent installation.
-// Behavioural risks still alert after sanctioning (verdict becomes "risky").
-func SanctionAgent(fingerprint string) error {
-	db := agentDB()
-	if db == nil {
-		return fmt.Errorf("audit database unavailable")
+// Sanction records the owner's approval of one agent installation.
+// Behavioural risks still alert afterwards (verdict becomes "risky").
+// In the daemon, callers must already have verified the request comes
+// from the owner (root); the Watcher itself does not authenticate.
+func (w *Watcher) Sanction(fingerprint string) error {
+	return w.setStatus(fingerprint, AgentSanctioned, "AGENT_SANCTIONED")
+}
+
+// Revoke withdraws a sanction.
+func (w *Watcher) Revoke(fingerprint string) error {
+	return w.setStatus(fingerprint, AgentUnsanctioned, "AGENT_REVOKED")
+}
+
+func (w *Watcher) setStatus(fingerprint, status, event string) error {
+	if w.cfg.DB == nil {
+		return fmt.Errorf("no agent database configured")
 	}
-	if err := setAgentStatus(db, fingerprint, AgentSanctioned); err != nil {
+	n, err := setAgentStatus(w.cfg.DB, fingerprint, status)
+	if err != nil {
 		return err
 	}
+	if n == 0 {
+		return fmt.Errorf("unknown agent %q", fingerprint)
+	}
 
-	agentWatch.mu.Lock()
+	w.mu.Lock()
 	name := fingerprint
-	for i := range agentWatch.running {
-		a := &agentWatch.running[i]
+	for i := range w.running {
+		a := &w.running[i]
 		if a.Fingerprint == fingerprint {
-			a.Status = AgentSanctioned
+			a.Status = status
 			a.Verdict, a.ActiveRisks = AgentVerdict(a.Status, a.Risks)
 			name = a.Name
 		}
 	}
-	cbs := agentWatch.callbacks
-	agentWatch.mu.Unlock()
+	cbs := w.callbacks
+	w.mu.Unlock()
 
-	WriteGoEvent("AGENT_SANCTIONED", name, "ok")
+	w.emit(event, name, "ok")
 	for _, cb := range cbs {
 		go cb()
 	}
 	return nil
 }
 
-// OnAgentsChanged registers a callback fired when the running set, a
-// verdict or a sanction status changes. tray.go refreshes its menu here.
-func OnAgentsChanged(cb func()) {
-	agentWatch.mu.Lock()
-	defer agentWatch.mu.Unlock()
-	agentWatch.callbacks = append(agentWatch.callbacks, cb)
+// ResolveID maps a short agent ID (as shown by the CLI) or a full
+// fingerprint to a fingerprint among the running agents.
+func (w *Watcher) ResolveID(id string) (string, error) {
+	var match []string
+	for _, a := range w.Running() {
+		if a.Fingerprint == id || strings.HasPrefix(a.ID, strings.ToLower(id)) {
+			match = append(match, a.Fingerprint)
+		}
+	}
+	switch len(match) {
+	case 0:
+		return "", fmt.Errorf("no running agent with id %q", id)
+	case 1:
+		return match[0], nil
+	}
+	return "", fmt.Errorf("id %q is ambiguous (%d agents)", id, len(match))
+}
+
+// OnChange registers a callback fired when the running set, a verdict or
+// a sanction status changes.
+func (w *Watcher) OnChange(cb func()) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.callbacks = append(w.callbacks, cb)
 }

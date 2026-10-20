@@ -24,7 +24,7 @@
 // platform. Collection: agentwatch_collect.go + agentwatch_{windows,other}.go.
 // Persistence: agentwatch_store.go. Design: docs/RESEARCH_AI_AGENT_MONITORING.md
 
-package main
+package agentwatch
 
 import (
 	_ "embed"
@@ -37,7 +37,7 @@ import (
 	"strings"
 )
 
-//go:embed assets/agent_catalog.json
+//go:embed catalog.json
 var defaultAgentCatalog []byte
 
 // ── CATALOG TYPES ────────────────────────────────────────────
@@ -155,22 +155,23 @@ func alternation(words []string) *regexp.Regexp {
 	return regexp.MustCompile("(?i)(" + strings.Join(quoted, "|") + ")")
 }
 
-// LoadAgentCatalog prefers ~/.devshield/agent_catalog.json (user override)
-// and falls back to the catalog embedded in the binary.
-func LoadAgentCatalog() (*AgentCatalog, error) {
-	if home, err := os.UserHomeDir(); err == nil {
-		override := filepath.Join(home, ".devshield", "agent_catalog.json")
-		if data, err := os.ReadFile(override); err == nil {
+// LoadAgentCatalog uses overridePath when it is set and readable, and
+// otherwise the catalog embedded in the binary. A broken override falls
+// back to the built-in catalog and returns a non-nil error describing why.
+// The override must only be writable by a trusted user: whoever can edit
+// it decides what counts as an agent.
+func LoadAgentCatalog(overridePath string) (*AgentCatalog, error) {
+	if overridePath != "" {
+		if data, err := os.ReadFile(overridePath); err == nil {
 			c, err := ParseAgentCatalog(data)
 			if err == nil {
 				return c, nil
 			}
-			// Broken override → fall back, but surface the reason
 			def, defErr := ParseAgentCatalog(defaultAgentCatalog)
 			if defErr != nil {
 				return nil, defErr
 			}
-			return def, fmt.Errorf("using built-in catalog, override ignored: %w", err)
+			return def, fmt.Errorf("using built-in catalog, override %s ignored: %w", overridePath, err)
 		}
 	}
 	return ParseAgentCatalog(defaultAgentCatalog)

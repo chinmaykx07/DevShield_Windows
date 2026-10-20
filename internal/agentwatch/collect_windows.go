@@ -5,7 +5,7 @@
 // All of these work without admin rights for the current user's own
 // processes. Other users' / elevated processes are simply skipped.
 
-package main
+package agentwatch
 
 import (
 	"os"

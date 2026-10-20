@@ -7,13 +7,16 @@
 // scan would miss most of these short-lived children, so the tracker
 // runs on its own fast tick (see agentwatch_collect.go).
 //
-// llmEnvHits finds LLM credentials/endpoints that were set specifically
-// for one process, ignoring variables every process inherits.
+// llmEnvValues/userBaselines/envHitsAgainst find LLM credentials/endpoints
+// set specifically for one process, ignoring ones a user's processes inherit.
 
-package main
+package agentwatch
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -139,28 +142,84 @@ func (t *spawnTracker) recent(pid int32) []string {
 	return names
 }
 
-// llmEnvHits returns the NAMES of LLM-related variables in procEnv that are
-// not simply inherited from the user's global environment (baseline, i.e.
-// DevShield's own environment). Values are compared and then discarded —
-// they are never stored or logged. A pattern ending in "*" is a prefix.
-func llmEnvHits(procEnv []string, baseline map[string]string, patterns []string) []string {
-	var hits []string
-	for _, kv := range procEnv {
+// llmEnvValues returns the LLM-related variables in env as
+// name → short hash of the value. Values are hashed immediately so that
+// secrets are never kept in memory or written anywhere. A pattern ending
+// in "*" is a prefix.
+func llmEnvValues(env []string, patterns []string) map[string]string {
+	out := map[string]string{}
+	for _, kv := range env {
 		i := strings.IndexByte(kv, '=')
 		if i <= 0 {
 			continue
 		}
-		name, val := kv[:i], kv[i+1:]
+		name, val := strings.ToUpper(kv[:i]), kv[i+1:]
 		if val == "" || !envNameMatches(name, patterns) {
 			continue
 		}
-		if global, ok := baseline[strings.ToUpper(name)]; ok && global == val {
-			continue // inherited by every process — says nothing about this one
+		sum := sha256.Sum256([]byte(val))
+		out[name] = hex.EncodeToString(sum[:8])
+	}
+	return out
+}
+
+// procEnv is one process's hashed LLM variables, for baseline building.
+type procEnv struct {
+	User string
+	Vars map[string]string
+}
+
+// Baseline thresholds: a variable counts as inherited for a user when at
+// least half of that user's processes (and at least minBaselineProcs of
+// them) carry it with the same value.
+const minBaselineProcs = 3
+
+// userBaselines finds, per user, the LLM variables most of that user's
+// processes share — i.e. ones inherited from the user's environment.
+func userBaselines(procs []procEnv) map[string]map[string]string {
+	total := map[string]int{}
+	counts := map[string]map[string]int{} // user → "name=hash" → n
+	for _, p := range procs {
+		total[p.User]++
+		if counts[p.User] == nil {
+			counts[p.User] = map[string]int{}
 		}
-		if !containsString(hits, strings.ToUpper(name)) {
-			hits = append(hits, strings.ToUpper(name))
+		for name, h := range p.Vars {
+			counts[p.User][name+"="+h]++
 		}
 	}
+	out := map[string]map[string]string{}
+	for user, kv := range counts {
+		for key, n := range kv {
+			if n >= minBaselineProcs && 2*n >= total[user] {
+				i := strings.IndexByte(key, '=')
+				if out[user] == nil {
+					out[user] = map[string]string{}
+				}
+				out[user][key[:i]] = key[i+1:]
+			}
+		}
+	}
+	return out
+}
+
+// envHitsAgainst returns the sorted names in vars whose value differs from
+// every baseline — the variables set specifically for this process.
+func envHitsAgainst(vars map[string]string, baselines ...map[string]string) []string {
+	var hits []string
+	for name, h := range vars {
+		inherited := false
+		for _, b := range baselines {
+			if b != nil && b[name] == h {
+				inherited = true
+				break
+			}
+		}
+		if !inherited {
+			hits = append(hits, name)
+		}
+	}
+	sort.Strings(hits)
 	return hits
 }
 
@@ -177,17 +236,6 @@ func envNameMatches(name string, patterns []string) bool {
 		}
 	}
 	return false
-}
-
-// envBaseline indexes an environment ("K=V" list) by upper-case name.
-func envBaseline(env []string) map[string]string {
-	m := make(map[string]string, len(env))
-	for _, kv := range env {
-		if i := strings.IndexByte(kv, '='); i > 0 {
-			m[strings.ToUpper(kv[:i])] = kv[i+1:]
-		}
-	}
-	return m
 }
 
 // exeFromCommand extracts the executable path from a command string such

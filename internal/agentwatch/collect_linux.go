@@ -7,7 +7,7 @@
 // (≈3% of a core). Instead, /proc is listed (one getdents) and a
 // process's stat file is read only the first time its PID is seen.
 
-package main
+package agentwatch
 
 import (
 	"bufio"

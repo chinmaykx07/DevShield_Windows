@@ -15,6 +15,8 @@ import (
 	"sync"
 
 	"fyne.io/systray"
+
+	"github.com/chinmaykx07/DevShield_Windows/internal/agentwatch"
 )
 
 const maxAgentSlots = 10
@@ -28,7 +30,7 @@ type agentSlot struct {
 // slotAgents maps slot index → agent currently shown in it.
 var (
 	slotMu     sync.Mutex
-	slotAgents [maxAgentSlots]RunningAgent
+	slotAgents [maxAgentSlots]agentwatch.RunningAgent
 )
 
 func buildAgentMenu() {
@@ -96,7 +98,7 @@ func refreshAgentMenu() {
 	defer slotMu.Unlock()
 	for i, s := range tr.agentSlots {
 		if i >= len(agents) {
-			slotAgents[i] = RunningAgent{}
+			slotAgents[i] = agentwatch.RunningAgent{}
 			s.item.Hide()
 			continue
 		}
@@ -109,7 +111,7 @@ func refreshAgentMenu() {
 			tip = "Rogue indicators: " + strings.Join(a.ActiveRisks, "; ") + "\n" + tip
 		}
 		s.item.SetTooltip(tip)
-		if a.Status == AgentSanctioned {
+		if a.Status == agentwatch.AgentSanctioned {
 			s.sanction.SetTitle(bilingual("✅ Sanctioned", "✅ स्वीकृत"))
 			s.sanction.Disable()
 		} else {
@@ -125,13 +127,13 @@ func refreshAgentMenu() {
 	}
 }
 
-func formatAgentsLabel(agents []RunningAgent) string {
+func formatAgentsLabel(agents []agentwatch.RunningAgent) string {
 	rogue, attention := 0, 0
 	for _, a := range agents {
 		switch a.Verdict {
-		case VerdictRogue:
+		case agentwatch.VerdictRogue:
 			rogue++
-		case VerdictRisky, VerdictUnsanctioned:
+		case agentwatch.VerdictRisky, agentwatch.VerdictUnsanctioned:
 			attention++
 		}
 	}
@@ -154,12 +156,12 @@ func formatAgentsLabel(agents []RunningAgent) string {
 		fmt.Sprintf("🤖 AI-प्रतिनिधि: %d सक्रिय%s", len(agents), more))
 }
 
-func formatAgentSlot(a RunningAgent) string {
+func formatAgentSlot(a agentwatch.RunningAgent) string {
 	icon := map[string]string{
-		VerdictRogue:        "🚨",
-		VerdictRisky:        "⚠",
-		VerdictUnsanctioned: "⚠",
-		VerdictSanctioned:   "✅",
+		agentwatch.VerdictRogue:        "🚨",
+		agentwatch.VerdictRisky:        "⚠",
+		agentwatch.VerdictUnsanctioned: "⚠",
+		agentwatch.VerdictSanctioned:   "✅",
 	}[a.Verdict]
 	procs := ""
 	if a.Processes > 1 {
@@ -167,9 +169,9 @@ func formatAgentSlot(a RunningAgent) string {
 	}
 	label := ""
 	switch a.Verdict {
-	case VerdictRogue:
+	case agentwatch.VerdictRogue:
 		label = bilingual(" — rogue suspect", " — संदिग्ध")
-	case VerdictRisky:
+	case agentwatch.VerdictRisky:
 		label = bilingual(" — sanctioned but acting suspiciously", " — स्वीकृत, पर संदिग्ध")
 	}
 	return fmt.Sprintf("%s %s%s%s", icon, a.Name, procs, label)

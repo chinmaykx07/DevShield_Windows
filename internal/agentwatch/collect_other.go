@@ -6,7 +6,7 @@
 // agentwatch_linux.go). These portable fallbacks only keep other
 // platforms compiling; they are slower and collect less.
 
-package main
+package agentwatch
 
 import "github.com/shirou/gopsutil/v3/process"
 
