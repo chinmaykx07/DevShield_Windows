@@ -132,7 +132,7 @@
     "vllm", "smolagents", "browser-use", "computer-use", "agentic"
   ],
 
-  "shell_names": ["pwsh.exe", "powershell.exe", "cmd.exe", "bash.exe", "sh.exe", "wsl.exe", "bash", "sh", "zsh"],
+  "shell_names": ["pwsh.exe", "powershell.exe", "cmd.exe", "bash.exe", "sh.exe", "wsl.exe", "bash", "sh", "zsh", "dash", "fish", "pwsh"],
 
   "tool_processes": [
     "git.exe", "curl.exe", "wget.exe", "python.exe", "python3.exe", "node.exe", "npm.cmd", "npx.cmd",
@@ -141,17 +141,20 @@
     "whoami.exe", "net.exe", "net1.exe", "netstat.exe", "nltest.exe", "systeminfo.exe", "reg.exe",
     "schtasks.exe", "sc.exe", "wmic.exe", "certutil.exe", "bitsadmin.exe", "vssadmin.exe", "cmdkey.exe",
     "rundll32.exe", "regsvr32.exe", "mshta.exe", "wscript.exe", "cscript.exe", "netsh.exe",
-    "git", "curl", "wget", "python3", "node", "rg", "grep", "ssh", "whoami"
+    "git", "curl", "wget", "python3", "node", "rg", "grep", "ssh", "whoami",
+    "dash", "fish", "zsh", "id", "sudo", "crontab", "systemctl", "nc", "ncat", "socat", "iptables", "nft", "useradd", "passwd", "chmod", "scp", "make"
   ],
 
   "sensitive_tools": [
     "whoami.exe", "net.exe", "net1.exe", "nltest.exe", "systeminfo.exe", "reg.exe", "schtasks.exe", "sc.exe",
     "wmic.exe", "certutil.exe", "bitsadmin.exe", "vssadmin.exe", "cmdkey.exe", "rundll32.exe", "regsvr32.exe",
-    "mshta.exe", "wscript.exe", "cscript.exe", "netsh.exe", "icacls.exe", "whoami"
+    "mshta.exe", "wscript.exe", "cscript.exe", "netsh.exe", "icacls.exe", "whoami",
+    "id", "sudo", "crontab", "systemctl", "nc", "ncat", "socat", "iptables", "nft", "useradd", "passwd"
   ],
 
   "terminal_hosts": [
-    "windowsterminal.exe", "openconsole.exe", "conhost.exe", "explorer.exe", "wezterm-gui.exe", "alacritty.exe"
+    "windowsterminal.exe", "openconsole.exe", "conhost.exe", "explorer.exe", "wezterm-gui.exe", "alacritty.exe",
+    "gnome-terminal-", "gnome-terminal-server", "konsole", "xterm", "kitty", "tmux: server", "screen", "sshd"
   ],
 
   "risky_flags": [

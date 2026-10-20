@@ -1,10 +1,10 @@
-//go:build !windows
+//go:build !windows && !linux
 
-// agentwatch_other.go — Non-Windows collectors for Agent Watch.
+// agentwatch_other.go — Fallback collectors (macOS, BSD) for Agent Watch.
 //
-// DevShield ships for Windows only. These implementations exist so the
-// project builds and Agent Watch's logic can be exercised on Linux/macOS
-// development machines and CI.
+// DevShield targets Windows and Linux (see agentwatch_windows.go and
+// agentwatch_linux.go). These portable fallbacks only keep other
+// platforms compiling; they are slower and collect less.
 
 package main
 
