@@ -1,0 +1,52 @@
+# DevShield privileged daemon (Linux).
+# Owns the sanction list, agent database and tamper-evident audit log in a
+# root-only state directory, and runs Agent Watch over every user's processes.
+#
+# Configure the owner (who may READ status/agents/events without sudo) in
+# /etc/devshield/daemon.env:   DEVSHIELD_OWNER=alice
+# Changing policy (sanction/revoke) always requires root: sudo devshield …
+[Unit]
+Description=DevShield daemon — keeps this machine under its owner's control
+Documentation=https://github.com/chinmaykx07/DevShield_Windows/blob/main/docs/USER_MANUAL.md
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/devshield/daemon.env
+ExecStart=/usr/bin/devshield daemon --owner ${DEVSHIELD_OWNER}
+Restart=always
+RestartSec=2
+
+# Root-only state and the client socket directory
+StateDirectory=devshield
+StateDirectoryMode=0700
+RuntimeDirectory=devshield
+RuntimeDirectoryMode=0755
+UMask=0077
+
+# ── Hardening ───────────────────────────────────────────────────────────
+# Only what Agent Watch needs: read every process's environment, loaded
+# libraries and executable (CAP_SYS_PTRACE), and read users' autostart
+# files (CAP_DAC_READ_SEARCH). Later phases (firewall, cpufreq) will add
+# exactly the capabilities they need, nothing more.
+CapabilityBoundingSet=CAP_SYS_PTRACE CAP_DAC_READ_SEARCH
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+# No PrivateTmp: rogue agents often live in /tmp, and the daemon must see
+# (and hash) the real files there.
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target

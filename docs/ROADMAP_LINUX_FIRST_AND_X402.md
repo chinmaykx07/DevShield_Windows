@@ -125,6 +125,13 @@ It was started by Coinbase and is now governed by an x402 foundation. It has Go 
 3. **Order: Linux → Windows → macOS.** The repo keeps its name `DevShield_Windows`.
 4. **x402: see section 8.** The goal is owner sovereignty, not x402 for its own sake.
 
+### Progress (2026-10-20)
+- ✅ Foundation: patched Go toolchain + CI verify job (vet, race tests, govulncheck; 35 → 0 reachable vulnerabilities).
+- ✅ Hash-chained audit log (`internal/auditlog`).
+- ✅ Root daemon + kernel-authenticated socket + CLI (`internal/daemon`, `internal/ipc`, `cli.go`). A non-root self-sanction is refused and logged. Verified live with real users.
+- ✅ Hardened systemd unit (`packaging/linux/devshield.service`). Not yet run under systemd.
+- ⏭ Next: sensors (hwmon) → thermal (cpufreq) → rollback → hosts sinkhole → nftables kill-switch → Linux tray → .deb/.rpm.
+
 ### Revised phases
 - **Phase L (Linux, full parity):** root helper (systemd) · sensors (hwmon) · thermal (cpufreq/boost) · hosts sinkhole · nftables kill-switch + LLMNR/MAC · network monitor · rollback in Go with tests · Agent Watch · daemon + CLI + tray · .deb/.rpm packaging · CI on Linux.
 - **Phase W (Windows):** fix C1–C8 in the PowerShell scripts, run on a real Windows machine/VM, test Agent Watch on Windows, ship the installer from CI.

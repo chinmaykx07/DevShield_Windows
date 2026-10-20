@@ -7,8 +7,8 @@
 // scan would miss most of these short-lived children, so the tracker
 // runs on its own fast tick (see agentwatch_collect.go).
 //
-// llmEnvValues/userBaselines/envHitsAgainst find LLM credentials/endpoints
-// set specifically for one process, ignoring ones a user's processes inherit.
+// llmEnvValues/envHitsIntroduced find LLM credentials/endpoints introduced
+// when a process was launched, ignoring ones it merely inherited.
 
 package agentwatch
 
@@ -163,61 +163,26 @@ func llmEnvValues(env []string, patterns []string) map[string]string {
 	return out
 }
 
-// procEnv is one process's hashed LLM variables, for baseline building.
-type procEnv struct {
-	User string
-	Vars map[string]string
-}
-
-// Baseline thresholds: a variable counts as inherited for a user when at
-// least half of that user's processes (and at least minBaselineProcs of
-// them) carry it with the same value.
-const minBaselineProcs = 3
-
-// userBaselines finds, per user, the LLM variables most of that user's
-// processes share — i.e. ones inherited from the user's environment.
-func userBaselines(procs []procEnv) map[string]map[string]string {
-	total := map[string]int{}
-	counts := map[string]map[string]int{} // user → "name=hash" → n
-	for _, p := range procs {
-		total[p.User]++
-		if counts[p.User] == nil {
-			counts[p.User] = map[string]int{}
-		}
-		for name, h := range p.Vars {
-			counts[p.User][name+"="+h]++
-		}
+// envHitsIntroduced returns the sorted names of LLM variables that were
+// INTRODUCED when this process was launched: present in vars, but not with
+// the same value in its parent. Inherited variables say nothing about the
+// process, wherever they came from — and this cannot be gamed by spawning
+// children, which only inherit.
+//
+// Variables introduced under a shell or terminal are skipped: that is
+// usually a person running `KEY=… cmd` or `export KEY`. (Known gap: a rogue
+// started through `sh -c` hides its key this way; its other behaviour still
+// counts.) also lists variables to ignore, e.g. DevShield's own environment.
+func envHitsIntroduced(vars, parentVars map[string]string, parentIsShell bool, also map[string]string) []string {
+	if parentIsShell {
+		return nil
 	}
-	out := map[string]map[string]string{}
-	for user, kv := range counts {
-		for key, n := range kv {
-			if n >= minBaselineProcs && 2*n >= total[user] {
-				i := strings.IndexByte(key, '=')
-				if out[user] == nil {
-					out[user] = map[string]string{}
-				}
-				out[user][key[:i]] = key[i+1:]
-			}
-		}
-	}
-	return out
-}
-
-// envHitsAgainst returns the sorted names in vars whose value differs from
-// every baseline — the variables set specifically for this process.
-func envHitsAgainst(vars map[string]string, baselines ...map[string]string) []string {
 	var hits []string
 	for name, h := range vars {
-		inherited := false
-		for _, b := range baselines {
-			if b != nil && b[name] == h {
-				inherited = true
-				break
-			}
+		if parentVars[name] == h || also[name] == h {
+			continue
 		}
-		if !inherited {
-			hits = append(hits, name)
-		}
+		hits = append(hits, name)
 	}
 	sort.Strings(hits)
 	return hits

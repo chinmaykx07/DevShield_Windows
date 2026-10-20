@@ -279,6 +279,17 @@ func TestScriptRunAgentsAreTrackedSeparately(t *testing.T) {
 	}
 }
 
+func TestMergeDoesNotRepeatReasonsWithDifferentCounts(t *testing.T) {
+	dets := []Detection{
+		{Name: "X", Exe: "/x", PID: 1, Reasons: []string{"ran 26 shells/tools recently (sh ×13)"}},
+		{Name: "X", Exe: "/x", PID: 2, Reasons: []string{"ran 24 shells/tools recently (sh ×12)", "connected to LLM API (api.openai.com)"}},
+	}
+	got := mergeDetections(dets)
+	if len(got) != 1 || len(got[0].Reasons) != 2 {
+		t.Fatalf("reasons not de-duplicated by kind: %v", got[0].Reasons)
+	}
+}
+
 func TestMergeKeepsRisksFromAnyProcess(t *testing.T) {
 	dets := []Detection{
 		{Name: "Cursor", Exe: `C:\cursor\Cursor.exe`, PID: 1},
@@ -348,40 +359,43 @@ func TestSpawnTrackerAttributesToolsThroughShells(t *testing.T) {
 	}
 }
 
-// A key in the user's environment is inherited by all their processes and
-// must not flag them; a key set for one process is a signal. Values are
-// never stored, only short hashes.
-func TestLLMEnvBaselinePerUser(t *testing.T) {
+// A key only counts for the process that introduced it. Children inherit
+// it, so a rogue cannot "launder" its key by spawning many children (the
+// flaw a majority-based baseline had). Values are hashed, never kept.
+func TestLLMEnvKeyCountsWhereIntroduced(t *testing.T) {
 	c := mustCatalog(t)
-	global := llmEnvValues([]string{"OPENAI_API_KEY=sk-alice-global", "PATH=/bin"}, c.LLMEnvVars)
-	special := llmEnvValues([]string{"OPENAI_API_KEY=sk-other", "LITELLM_PROXY=1", "EMPTY_KEY="}, c.LLMEnvVars)
-
-	for name, h := range special {
+	rogue := llmEnvValues([]string{"OPENAI_API_KEY=sk-rogue", "LITELLM_PROXY=1", "EMPTY_KEY=", "PATH=/bin"}, c.LLMEnvVars)
+	for name, h := range rogue {
 		if strings.Contains(h, "sk-") || len(h) != 16 {
 			t.Fatalf("value not hashed for %s: %q", name, h)
 		}
 	}
-	if _, ok := special["EMPTY_KEY"]; ok {
+	if _, ok := rogue["EMPTY_KEY"]; ok {
 		t.Fatal("non-LLM variable captured")
 	}
 
-	var procs []procEnv
-	for i := 0; i < 5; i++ {
-		procs = append(procs, procEnv{User: "alice", Vars: global})
-	}
-	procs = append(procs, procEnv{User: "alice", Vars: special}, procEnv{User: "bob", Vars: global})
-	base := userBaselines(procs)
-
-	if hits := envHitsAgainst(global, base["alice"]); len(hits) != 0 {
-		t.Errorf("alice's inherited key flagged: %v", hits)
-	}
-	hits := envHitsAgainst(special, base["alice"])
+	launcher := map[string]string{} // e.g. runuser, cron, systemd: no key
+	hits := envHitsIntroduced(rogue, launcher, false, nil)
 	if !containsString(hits, "OPENAI_API_KEY") || !containsString(hits, "LITELLM_PROXY") {
-		t.Errorf("process-specific keys not flagged: %v", hits)
+		t.Fatalf("key introduced by the rogue not flagged: %v", hits)
 	}
-	// bob has a single process: too few to call anything "inherited"
-	if hits := envHitsAgainst(global, base["bob"]); len(hits) != 1 {
-		t.Errorf("bob baseline should be empty, hits=%v", hits)
+	// Its children (any number of them) inherit the same values → not flagged,
+	// and that does not affect the rogue's own result above.
+	if h := envHitsIntroduced(rogue, rogue, false, nil); len(h) != 0 {
+		t.Fatalf("inherited key flagged on child: %v", h)
+	}
+	// A key the parent has with a DIFFERENT value was re-introduced → flagged.
+	other := llmEnvValues([]string{"OPENAI_API_KEY=sk-different"}, c.LLMEnvVars)
+	if h := envHitsIntroduced(other, rogue, false, nil); len(h) != 1 {
+		t.Fatalf("changed key not flagged: %v", h)
+	}
+	// Introduced under a human shell (export / KEY=… cmd) → not a signal.
+	if h := envHitsIntroduced(rogue, launcher, true, nil); len(h) != 0 {
+		t.Fatalf("key set from a shell should not count: %v", h)
+	}
+	// Same as DevShield's own environment → ignored (tray mode).
+	if h := envHitsIntroduced(rogue, launcher, false, rogue); len(h) != 0 {
+		t.Fatalf("own-environment key flagged: %v", h)
 	}
 }
 

@@ -122,6 +122,35 @@ Agent Watch only alerts. It never stops or blocks a process. To recognise an age
 
 ---
 
+## 2b. Linux: the DevShield daemon (in development)
+
+On Linux, DevShield runs as a **root service** that owns everything an AI agent must not be able to change: the sanction list, the agent database and the **tamper-evident audit log**. All of these live in `/var/lib/devshield`, readable by root only. You use it from the command line:
+
+```bash
+devshield status                 # daemon health + audit-log integrity
+devshield agents                 # running AI agents and verdicts (🚨 rogue, ⚠ risky/unsanctioned, ✅)
+devshield events -n 30           # recent audit events
+sudo devshield sanction <ID>     # approve an agent  — needs root
+sudo devshield revoke <ID>       # withdraw approval — needs root
+sudo devshield verify-log        # check the audit log's hash chain
+```
+
+- **Why approving needs `sudo`:** an AI agent runs as *you*. If your user could change the rules, so could the agent. Any non-root attempt to sanction or revoke is refused and logged as `AGENT_TAMPER_ATTEMPT`, naming the program that tried.
+- **Who can read:** root, plus the owner set in `/etc/devshield/daemon.env` (`DEVSHIELD_OWNER=alice`). Other local users are refused.
+- **The audit log is hash-chained.** Editing, deleting, reordering or truncating records is detected and reported with the exact line. Tampering found at start-up is logged as `AUDIT_TAMPER_DETECTED`. A daemon that was killed, rather than stopped cleanly, shows up as `DAEMON_UNCLEAN_STOP` on its next start.
+- **Exit codes for scripts and monitoring:** `status` and `agents` exit with **3** when a rogue or risky agent is running or the log is tampered with.
+
+**Install, by hand for now** (packages come later):
+
+```bash
+sudo install -m 0755 devshield /usr/bin/devshield
+sudo install -D -m 0644 packaging/linux/devshield.service /etc/systemd/system/devshield.service
+echo "DEVSHIELD_OWNER=$USER" | sudo install -D -m 0644 /dev/stdin /etc/devshield/daemon.env
+sudo systemctl daemon-reload && sudo systemctl enable --now devshield
+```
+
+Status: tested by unit tests and a live run with real users on Linux (owner/other user, a rogue attempting self-sanction, `kill -9`, log tampering). **Not yet tested under systemd itself**, so the unit's hardening settings still need a real-machine check. Thermal, privacy, firewall and the tray on Linux come next.
+
 ## 3. Pro Use
 
 ### CLI reference

@@ -11,6 +11,7 @@ package main
 
 import (
 	"log"
+	"os"
 
 	"fyne.io/systray"
 )
@@ -22,6 +23,11 @@ const dsVersion = "0.1.0"
 // ── MAIN ─────────────────────────────────────────────────────
 
 func main() {
+	// Any arguments → command-line mode (daemon, status, agents, …).
+	if len(os.Args) > 1 {
+		os.Exit(runCLI(os.Args[1:], os.Stdout, os.Stderr))
+	}
+
 	// 0. Configure logger
 	log.SetFlags(log.Ltime | log.Lshortfile)
 	log.Printf("DevShield v%s starting", dsVersion)

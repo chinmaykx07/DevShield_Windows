@@ -348,7 +348,7 @@ func mergeDetections(dets []Detection) []RunningAgent {
 			a.AgentScore = d.AgentScore
 		}
 		for _, r := range d.Reasons {
-			if !containsString(a.Reasons, r) {
+			if !hasReasonKind(a.Reasons, r) {
 				a.Reasons = append(a.Reasons, r)
 			}
 		}
@@ -359,6 +359,31 @@ func mergeDetections(dets []Detection) []RunningAgent {
 		}
 	}
 	return out
+}
+
+// hasReasonKind reports whether list already has a reason of the same kind
+// as r, ignoring counts ("ran 26 shells…" and "ran 24 shells…" are one kind),
+// so merging an agent's processes doesn't repeat itself.
+func hasReasonKind(list []string, r string) bool {
+	k := reasonKind(r)
+	for _, x := range list {
+		if reasonKind(x) == k {
+			return true
+		}
+	}
+	return false
+}
+
+func reasonKind(r string) string {
+	if i := strings.IndexByte(r, '('); i > 0 {
+		r = r[:i]
+	}
+	return strings.Map(func(c rune) rune {
+		if c >= '0' && c <= '9' {
+			return -1
+		}
+		return c
+	}, r)
 }
 
 func sameRunning(a, b []RunningAgent) bool {
@@ -466,20 +491,21 @@ func (w *Watcher) collect(cat *AgentCatalog) (Snapshot, error) {
 		}
 	}
 
-	// LLM keys that most of a user's processes share were inherited from
-	// that user's environment and say nothing about any one process. Only
-	// keys set for a particular process count as a signal.
-	envs := make([]procEnv, 0, len(w.procCache))
-	for _, c := range w.procCache {
-		if c.envRead {
-			envs = append(envs, procEnv{User: c.info.User, Vars: c.envLLM})
-		}
-	}
-	baselines := userBaselines(envs)
+	// An LLM key only counts for the process that INTRODUCED it (parent
+	// lacks the same key+value). Children inherit; they don't count.
 	for pid, c := range w.procCache {
-		if b := snap.Behavior[pid]; b != nil && len(c.envLLM) > 0 {
-			b.EnvHits = envHitsAgainst(c.envLLM, baselines[c.info.User], w.ownEnv)
+		b := snap.Behavior[pid]
+		if b == nil || len(c.envLLM) == 0 {
+			continue
 		}
+		parent, ok := w.procCache[c.info.PPID]
+		var parentVars map[string]string
+		if ok && parent.envRead {
+			parentVars = parent.envLLM
+		}
+		parentName := strings.ToLower(parent.info.Name)
+		parentIsShell := ok && (cat.shells[parentName] || cat.termHosts[parentName])
+		b.EnvHits = envHitsIntroduced(c.envLLM, parentVars, parentIsShell, w.ownEnv)
 	}
 
 	conns, err := gnet.Connections("tcp")

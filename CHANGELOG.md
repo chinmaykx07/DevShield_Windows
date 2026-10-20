@@ -15,6 +15,24 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   the tray. Alert-only, no admin needed. Not yet tested on Windows. See
   `docs/RESEARCH_AI_AGENT_MONITORING.md`.
 
+- Linux root daemon (`devshield daemon`) + CLI (`status`, `agents`,
+  `events`, `sanction`, `revoke`, `verify-log`). It owns the sanction list,
+  agent database and audit log in a root-only directory, and talks to
+  clients over a Unix socket whose callers are identified by the kernel
+  (SO_PEERCRED). Policy changes require root, so an agent cannot sanction
+  itself; attempts are logged as AGENT_TAMPER_ATTEMPT. Hardened systemd
+  unit in `packaging/linux/` (not yet tested under systemd).
+- Tamper-evident, hash-chained audit log: edits, deletions, reordering and
+  truncation are detected; unclean daemon stops are reported.
+
+### Changed
+- Agent Watch moved to `internal/agentwatch` as a configurable Watcher.
+- An LLM key now counts only for the process that introduced it at launch.
+  Inherited keys don't count, so a rogue can't launder its key by spawning
+  children (a flaw found in live testing of the previous majority rule).
+- Built with patched Go 1.27.3: reachable known vulnerabilities went from
+  35 to 0. CI now runs vet, race tests and govulncheck on Linux and Windows.
+
 ### Fixed
 - App froze on Quit (`closeAudit` self-deadlock on `auditMu`).
 
