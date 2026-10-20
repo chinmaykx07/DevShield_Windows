@@ -1,0 +1,159 @@
+// Package ipc is the local channel between the DevShield daemon (root)
+// and its clients (CLI, tray) running as the user.
+//
+// Who is calling is decided by the KERNEL, not by the caller: on Linux the
+// server reads the peer's uid/pid with SO_PEERCRED, so a process cannot
+// claim to be root. Authorization (which uid may do what) belongs to the
+// daemon; this package only transports one JSON request and one JSON
+// response per connection, with size limits and deadlines.
+package ipc
+
+import (
+	"bufio"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log"
+	"net"
+	"time"
+
+	"github.com/chinmaykx07/DevShield_Windows/internal/auditlog"
+)
+
+// DefaultSocket is where the Linux daemon listens.
+const DefaultSocket = "/run/devshield/devshield.sock"
+
+const (
+	maxRequestBytes = 64 << 10
+	ioTimeout       = 10 * time.Second
+)
+
+// Request is what a client asks for.
+type Request struct {
+	Op    string `json:"op"`              // status | agents | events | verify | sanction | revoke
+	ID    string `json:"id,omitempty"`    // agent id for sanction/revoke
+	Limit int    `json:"limit,omitempty"` // for events
+}
+
+// Agent is the client-facing view of one running agent.
+type Agent struct {
+	ID        string   `json:"id"`
+	Name      string   `json:"name"`
+	Vendor    string   `json:"vendor,omitempty"`
+	Kind      string   `json:"kind"`
+	Verdict   string   `json:"verdict"`
+	Status    string   `json:"status"`
+	PID       int32    `json:"pid"`
+	Processes int      `json:"processes"`
+	User      string   `json:"user,omitempty"`
+	Exe       string   `json:"exe,omitempty"`
+	Reasons   []string `json:"reasons,omitempty"`
+	Risks     []string `json:"risks,omitempty"`
+}
+
+// Status summarises the daemon's health.
+type Status struct {
+	Version     string `json:"version"`
+	UptimeSec   int64  `json:"uptime_sec"`
+	Agents      int    `json:"agents"`
+	Rogue       int    `json:"rogue"`
+	Risky       int    `json:"risky"`
+	LogRecords  int    `json:"log_records"`
+	LogIntact   bool   `json:"log_intact"`
+	LogProblem  string `json:"log_problem,omitempty"`
+	TamperSince bool   `json:"tamper_detected_this_run"`
+}
+
+// Response is the daemon's answer.
+type Response struct {
+	OK     bool              `json:"ok"`
+	Error  string            `json:"error,omitempty"`
+	Status *Status           `json:"status,omitempty"`
+	Agents []Agent           `json:"agents,omitempty"`
+	Events []auditlog.Record `json:"events,omitempty"`
+}
+
+// Peer identifies the process on the other end, as reported by the kernel.
+type Peer struct {
+	UID int
+	PID int
+	Exe string // best effort, from /proc/<pid>/exe
+}
+
+func (p Peer) String() string {
+	return fmt.Sprintf("uid=%d pid=%d exe=%s", p.UID, p.PID, p.Exe)
+}
+
+// Handler answers one authenticated request.
+type Handler func(peer Peer, req Request) Response
+
+// ErrUnsupported is returned where the daemon channel isn't implemented yet.
+var ErrUnsupported = errors.New("the DevShield daemon is not available on this platform yet")
+
+// Serve accepts connections until the listener is closed.
+func Serve(l net.Listener, h Handler) error {
+	for {
+		conn, err := l.Accept()
+		if err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				return nil
+			}
+			return err
+		}
+		go handle(conn, h)
+	}
+}
+
+func handle(conn net.Conn, h Handler) {
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(ioTimeout))
+
+	peer, err := peerOf(conn)
+	if err != nil {
+		// Without kernel-verified identity nothing is answered.
+		log.Printf("ipc: rejecting connection without peer credentials: %v", err)
+		writeResponse(conn, Response{Error: "cannot verify caller identity"})
+		return
+	}
+
+	line, err := bufio.NewReader(io.LimitReader(conn, maxRequestBytes)).ReadBytes('\n')
+	if err != nil && len(line) == 0 {
+		return
+	}
+	var req Request
+	if err := json.Unmarshal(line, &req); err != nil {
+		writeResponse(conn, Response{Error: "malformed request"})
+		return
+	}
+	writeResponse(conn, h(peer, req))
+}
+
+func writeResponse(w io.Writer, r Response) {
+	b, _ := json.Marshal(r)
+	_, _ = w.Write(append(b, '\n'))
+}
+
+// Call sends one request to the daemon at socketPath and returns its answer.
+func Call(socketPath string, req Request) (Response, error) {
+	conn, err := net.DialTimeout("unix", socketPath, 3*time.Second)
+	if err != nil {
+		return Response{}, fmt.Errorf("cannot reach the DevShield daemon at %s: %w", socketPath, err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(ioTimeout))
+
+	b, _ := json.Marshal(req)
+	if _, err := conn.Write(append(b, '\n')); err != nil {
+		return Response{}, err
+	}
+	line, err := bufio.NewReader(io.LimitReader(conn, 16<<20)).ReadBytes('\n')
+	if err != nil && len(line) == 0 {
+		return Response{}, fmt.Errorf("no answer from daemon: %w", err)
+	}
+	var resp Response
+	if err := json.Unmarshal(line, &resp); err != nil {
+		return Response{}, fmt.Errorf("bad answer from daemon: %w", err)
+	}
+	return resp, nil
+}

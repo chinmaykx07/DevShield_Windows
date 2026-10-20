@@ -1,0 +1,334 @@
+// Package daemon is DevShield's privileged service (Linux: run as root by
+// systemd). It owns everything an AI agent must not be able to change —
+// the sanction list, the agent database and the audit log — and runs
+// Agent Watch with full visibility of every user's processes.
+//
+// Clients (CLI, tray) talk to it over internal/ipc. The kernel tells the
+// daemon who is calling; the rules are:
+//
+//	read  (status, agents, events, verify)  root or a configured owner uid
+//	write (sanction, revoke)                root only — i.e. the owner via sudo
+//
+// A non-root process trying to change policy is recorded as
+// AGENT_TAMPER_ATTEMPT, naming the program that tried.
+package daemon
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/chinmaykx07/DevShield_Windows/internal/agentwatch"
+	"github.com/chinmaykx07/DevShield_Windows/internal/auditlog"
+	"github.com/chinmaykx07/DevShield_Windows/internal/ipc"
+
+	_ "modernc.org/sqlite"
+)
+
+// Defaults for a packaged Linux install.
+const (
+	DefaultStateDir = "/var/lib/devshield"
+	DefaultCatalog  = "/etc/devshield/agent_catalog.json"
+)
+
+// Config for one daemon run.
+type Config struct {
+	StateDir        string // root-only directory for the database and audit log
+	Socket          string // ipc socket path
+	CatalogOverride string // optional root-owned catalog override
+	Owners          []int  // non-root uids allowed to READ status/agents/events
+	Version         string
+}
+
+var readOps = map[string]bool{"status": true, "agents": true, "events": true, "verify": true}
+var writeOps = map[string]bool{"sanction": true, "revoke": true}
+
+// authorize decides whether peer may run op. tamper is true when a
+// non-root process attempted a policy change — worth an alert of its own.
+func authorize(peer ipc.Peer, op string, owners map[int]bool) (allowed, tamper bool) {
+	switch {
+	case peer.UID == 0:
+		return readOps[op] || writeOps[op], false
+	case readOps[op]:
+		return owners[peer.UID], false
+	case writeOps[op]:
+		return false, true
+	}
+	return false, false
+}
+
+// Daemon is one running instance.
+type Daemon struct {
+	cfg     Config
+	owners  map[int]bool
+	log     *auditlog.Log
+	logPath string
+	db      *sql.DB
+	watcher *agentwatch.Watcher
+	started time.Time
+	tamper  bool
+
+	limMu   sync.Mutex
+	limited map[int]*window // uid → denied-event rate window
+}
+
+type window struct {
+	start      time.Time
+	count      int
+	suppressed int
+}
+
+// Denied/tamper events are rate-limited per uid so a hostile process
+// cannot fill the disk by hammering the socket.
+const (
+	deniedPerMinute = 10
+)
+
+// Run starts the daemon and blocks until ctx is cancelled.
+func Run(ctx context.Context, cfg Config) error {
+	d, err := start(cfg)
+	if err != nil {
+		return err
+	}
+	defer d.close()
+
+	l, err := ipc.Listen(cfg.Socket)
+	if err != nil {
+		return fmt.Errorf("listen on %s: %w", cfg.Socket, err)
+	}
+	go func() {
+		if err := ipc.Serve(l, d.handle); err != nil {
+			log.Printf("daemon: ipc: %v", err)
+		}
+	}()
+	log.Printf("daemon: listening on %s, state in %s", cfg.Socket, cfg.StateDir)
+
+	<-ctx.Done()
+	l.Close()
+	return nil
+}
+
+func start(cfg Config) (*Daemon, error) {
+	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
+		return nil, err
+	}
+	if err := os.Chmod(cfg.StateDir, 0o700); err != nil {
+		return nil, err
+	}
+
+	d := &Daemon{
+		cfg:     cfg,
+		owners:  map[int]bool{},
+		logPath: filepath.Join(cfg.StateDir, "audit.log"),
+		started: time.Now(),
+		limited: map[int]*window{},
+	}
+	for _, uid := range cfg.Owners {
+		d.owners[uid] = true
+	}
+
+	// ── Audit log: verify, and record tampering instead of going blind ──
+	al, err := auditlog.Open(d.logPath)
+	var chainErr *auditlog.ChainError
+	if err != nil && !errors.As(err, &chainErr) {
+		return nil, fmt.Errorf("open audit log: %w", err)
+	}
+	d.log = al
+	if chainErr != nil {
+		d.tamper = true
+		d.event("AUDIT_TAMPER_DETECTED", chainErr.Error(), "fail")
+	}
+	if last, _ := auditlog.Tail(d.logPath, 1); len(last) == 1 && last[0].Action != "DAEMON_STOPPED" {
+		d.event("DAEMON_UNCLEAN_STOP", "previous run ended without a clean stop (killed, crashed or power loss) after "+last[0].Action, "warn")
+	}
+	if os.Geteuid() != 0 {
+		d.event("DAEMON_NOT_ROOT", "running without root: other users' processes are partly hidden and the state directory is only as safe as this account", "warn")
+	}
+
+	// ── Agent database (root-only file) ──
+	dbPath := filepath.Join(cfg.StateDir, "agents.db")
+	if f, err := os.OpenFile(dbPath, os.O_CREATE|os.O_RDWR, 0o600); err == nil {
+		f.Close()
+	}
+	if err := os.Chmod(dbPath, 0o600); err != nil {
+		return nil, err
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		return nil, err
+	}
+	d.db = db
+
+	w, err := agentwatch.New(agentwatch.Config{
+		DB:              db,
+		Emit:            func(a, det, s string) { d.eventFrom(a, det, s, "agentwatch") },
+		CatalogOverride: cfg.CatalogOverride,
+	})
+	if err != nil {
+		return nil, err
+	}
+	d.watcher = w
+	w.Start()
+
+	d.event("DAEMON_STARTED", fmt.Sprintf("version %s, owners %v, uid %d", cfg.Version, cfg.Owners, os.Geteuid()), "ok")
+	return d, nil
+}
+
+func (d *Daemon) close() {
+	d.watcher.Stop()
+	d.event("DAEMON_STOPPED", "clean shutdown", "ok")
+	d.log.Close()
+	d.db.Close()
+}
+
+func (d *Daemon) event(action, detail, status string) {
+	d.eventFrom(action, detail, status, "daemon")
+}
+
+func (d *Daemon) eventFrom(action, detail, status, source string) {
+	if _, err := d.log.Append(action, detail, status, source); err != nil {
+		log.Printf("daemon: audit append failed: %v", err)
+	}
+}
+
+// allowDeniedEvent applies the per-uid rate limit to denial events.
+func (d *Daemon) allowDeniedEvent(uid int) (bool, int) {
+	d.limMu.Lock()
+	defer d.limMu.Unlock()
+	w := d.limited[uid]
+	now := time.Now()
+	if w == nil || now.Sub(w.start) > time.Minute {
+		suppressed := 0
+		if w != nil {
+			suppressed = w.suppressed
+		}
+		d.limited[uid] = &window{start: now, count: 1}
+		return true, suppressed
+	}
+	if w.count >= deniedPerMinute {
+		w.suppressed++
+		return false, 0
+	}
+	w.count++
+	return true, 0
+}
+
+// handle answers one request from a kernel-identified peer.
+func (d *Daemon) handle(peer ipc.Peer, req ipc.Request) ipc.Response {
+	allowed, tamper := authorize(peer, req.Op, d.owners)
+	if !allowed {
+		if ok, suppressed := d.allowDeniedEvent(peer.UID); ok {
+			if suppressed > 0 {
+				d.event("IPC_DENIED_SUPPRESSED", fmt.Sprintf("%d further denials from uid %d were not logged", suppressed, peer.UID), "warn")
+			}
+			if tamper {
+				d.event("AGENT_TAMPER_ATTEMPT", fmt.Sprintf("non-root process tried %q (id %q): %s", req.Op, req.ID, peer), "fail")
+			} else {
+				d.event("IPC_DENIED", fmt.Sprintf("%q refused for %s", req.Op, peer), "warn")
+			}
+		}
+		if tamper {
+			return ipc.Response{Error: "changing DevShield policy requires root (run with sudo)"}
+		}
+		return ipc.Response{Error: "not authorized"}
+	}
+
+	switch req.Op {
+	case "status":
+		return ipc.Response{OK: true, Status: d.status()}
+	case "agents":
+		return ipc.Response{OK: true, Agents: d.agents()}
+	case "events":
+		n := req.Limit
+		if n <= 0 || n > 500 {
+			n = 20
+		}
+		recs, err := auditlog.Tail(d.logPath, n)
+		if err != nil {
+			return ipc.Response{Error: err.Error()}
+		}
+		return ipc.Response{OK: true, Events: recs}
+	case "verify":
+		st := d.status()
+		if !st.LogIntact {
+			return ipc.Response{Error: st.LogProblem, Status: st}
+		}
+		return ipc.Response{OK: true, Status: st}
+	case "sanction", "revoke":
+		fp, err := d.watcher.ResolveID(req.ID)
+		if err != nil {
+			return ipc.Response{Error: err.Error()}
+		}
+		if req.Op == "sanction" {
+			err = d.watcher.Sanction(fp)
+		} else {
+			err = d.watcher.Revoke(fp)
+		}
+		if err != nil {
+			return ipc.Response{Error: err.Error()}
+		}
+		d.event("OWNER_ACTION", fmt.Sprintf("%s %s by %s", req.Op, req.ID, peer), "ok")
+		return ipc.Response{OK: true}
+	}
+	return ipc.Response{Error: "unknown operation"}
+}
+
+func (d *Daemon) status() *ipc.Status {
+	st := &ipc.Status{
+		Version:     d.cfg.Version,
+		UptimeSec:   int64(time.Since(d.started).Seconds()),
+		TamperSince: d.tamper,
+	}
+	for _, a := range d.watcher.Running() {
+		st.Agents++
+		switch a.Verdict {
+		case agentwatch.VerdictRogue:
+			st.Rogue++
+		case agentwatch.VerdictRisky:
+			st.Risky++
+		}
+	}
+	n, err := auditlog.Verify(d.logPath)
+	st.LogRecords, st.LogIntact = n, err == nil
+	if err != nil {
+		st.LogProblem = err.Error()
+	}
+	return st
+}
+
+func (d *Daemon) agents() []ipc.Agent {
+	running := d.watcher.Running()
+	out := make([]ipc.Agent, 0, len(running))
+	for _, a := range running {
+		out = append(out, ipc.Agent{
+			ID: a.ID, Name: a.Name, Vendor: a.Vendor, Kind: a.Kind,
+			Verdict: a.Verdict, Status: a.Status, PID: a.PID, Processes: a.Processes,
+			User: a.User, Exe: a.Exe, Reasons: a.Reasons, Risks: a.ActiveRisks,
+		})
+	}
+	return out
+}
+
+// ParseOwners turns "alice,1000" into uids (names resolved via lookup).
+func ParseOwners(spec string, lookup func(string) (int, error)) ([]int, error) {
+	var out []int
+	for _, part := range strings.Split(spec, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		uid, err := lookup(part)
+		if err != nil {
+			return nil, fmt.Errorf("owner %q: %w", part, err)
+		}
+		out = append(out, uid)
+	}
+	return out, nil
+}
