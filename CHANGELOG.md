@@ -93,12 +93,26 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   35 to 0. CI now runs vet, race tests and govulncheck on Linux and Windows.
 
 ### Fixed
+- Second code audit (13 bugs, each with a regression test): a second
+  daemon could break the audit chain and take the socket (now one per
+  state directory); stopping could withdraw an allowance silently (a
+  database error read as "revoked"); concurrent checks logged false
+  failures; LLM host lookups stalled scans for minutes during a
+  lockdown; rules nft lists differently were shown as "not loaded" and
+  re-applied every 10 s; `EGRESS_RULES_MISSING` was logged every 10 s;
+  the thermal profile was named but not in effect after a reboot (now
+  re-applied at start); a full disk made the audit log look tampered and
+  events vanished silently; `systemctl stop` left an unconfirmed lockdown
+  in force; a change in force but not saved was reported as a plain
+  failure, and slow requests as "no answer"; auto-start scanning missed
+  cron, `/etc/systemd/user`, overrides and homes outside /home; the unit
+  didn't create NetworkManager's conf.d; egress.json wasn't fsync'd.
 - Messages that claimed more than happened (found in a second audit of
   every user-visible message): unblock/disallow/restore-all now say when
   a process stayed quarantined, lost its allowance or went to the root
   cgroup instead of its own, and exit 3; `lan-privacy off` says whether
   the original IPv6 value was really written back and reports failed
-  service reloads; rules DevShield can't compare are reported as UNKNOWN
+  service reloads; rules DevShield can't compare are reported as unverified
   (`EGRESS_RULES_UNVERIFIABLE`), not as tampering; a damaged sinkhole
   block, an audit log that couldn't be checked and blocked agents not yet
   cut off (⏳) are shown; refused-request summaries are per user and kind,

@@ -230,7 +230,7 @@ func TestStaleTimerDoesNotRevertNewerLockdown(t *testing.T) {
 	if err := m.LockdownOn(Lockdown{Interfaces: []string{"tun0"}}, time.Hour); err != nil {
 		t.Fatal(err)
 	}
-	m.revertPending(staleGen) // the first window's timer, arriving late
+	m.revertPending(staleGen, "not confirmed in time") // the first window's timer, arriving late
 	if l := m.Status().Lockdown; l == nil || l.Interfaces[0] != "tun0" {
 		t.Fatalf("newer lockdown reverted by a stale timer: %+v", l)
 	}
@@ -481,5 +481,44 @@ func TestResetRemovesLeftoverGroups(t *testing.T) {
 	}
 	if strings.Contains(nft.last(), "chain egress") {
 		t.Errorf("rules still loaded after a clean reset:\n%s", nft.last())
+	}
+}
+
+// Stopping the daemon kills the revert timer, so an unconfirmed lockdown
+// must be reverted then; a confirmed one must stay.
+func TestStopRevertsUnconfirmedLockdown(t *testing.T) {
+	nft := &fakeNft{}
+	m := newTestManager(t, nft, t.TempDir())
+	if err := m.LockdownOn(wg0, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	m.Stop()
+	if st := m.Status(); st.Lockdown != nil || !st.ConfirmBy.IsZero() || strings.Contains(nft.last(), "chain egress") {
+		t.Fatalf("unconfirmed lockdown survived stop: %+v\n%s", st, nft.last())
+	}
+	if err := m.LockdownOn(wg0, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	m.Confirm()
+	m.Stop()
+	if m.Status().Lockdown == nil {
+		t.Fatal("confirmed lockdown removed on stop")
+	}
+}
+
+// When the rules load but saving fails, the error must say the change is
+// in force (it used to read like nothing happened).
+func TestSaveFailureSaysChangeIsInForce(t *testing.T) {
+	nft := &fakeNft{}
+	m := newTestManager(t, nft, t.TempDir())
+	blocker := filepath.Join(t.TempDir(), "file")
+	os.WriteFile(blocker, nil, 0o600)
+	m.cfg.StateDir = filepath.Join(blocker, "state") // can't be created: saving fails, even as root
+	err := m.LockdownOn(wg0, 0)
+	if err == nil || !strings.Contains(err.Error(), "in force now") {
+		t.Fatalf("err = %v", err)
+	}
+	if m.Status().Lockdown == nil || !strings.Contains(nft.last(), "chain egress") {
+		t.Fatal("status no longer matches the kernel")
 	}
 }

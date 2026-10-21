@@ -226,6 +226,7 @@ func start(cfg Config) (*Daemon, error) {
 		return nil, err
 	}
 	d.watcher = w
+	d.reapplyProfile()
 	w.Start()
 	d.startEgress()
 	d.startNetwatch()
@@ -260,6 +261,9 @@ func (d *Daemon) stopBackground() {
 		d.halted = true  // callbacks still in flight return at once
 		d.recMu.Unlock()
 		d.bg.Wait()
+		if d.egress != nil {
+			d.egress.Stop() // revert an unconfirmed lockdown: its timer dies with us
+		}
 	})
 }
 
@@ -434,6 +438,26 @@ func (d *Daemon) handle(peer ipc.Peer, req ipc.Request) ipc.Response {
 }
 
 func (d *Daemon) thermalDir() string { return filepath.Join(d.cfg.StateDir, "thermal") }
+
+// reapplyProfile puts the chosen thermal profile back at start: the kernel
+// resets these settings at boot, and "profile" would otherwise name a
+// profile that is no longer in effect.
+func (d *Daemon) reapplyProfile() {
+	p := thermal.Active(d.thermalDir())
+	if p == "" {
+		return
+	}
+	res, err := thermal.Apply(thermal.Detect(d.cfg.SysRoot), p, d.thermalDir())
+	if err != nil {
+		d.event("THERMAL_PROFILE_FAILED", fmt.Sprintf("%s could not be re-applied at start (the kernel resets these settings at boot): %v", p, err), "fail")
+		return
+	}
+	status := "ok"
+	if len(res.Mismatch) > 0 {
+		status = "warn"
+	}
+	d.event("THERMAL_PROFILE_REAPPLIED", fmt.Sprintf("%s re-applied at start: %d applied, %d skipped, %d mismatched", p, len(res.Applied), len(res.Skipped), len(res.Mismatch)), status)
+}
 
 func (d *Daemon) thermalStatus() *ipc.Thermal {
 	c := thermal.Detect(d.cfg.SysRoot)

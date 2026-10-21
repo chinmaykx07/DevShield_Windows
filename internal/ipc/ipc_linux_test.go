@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // A socket a running daemon answers on must not be taken over; a stale
@@ -36,4 +37,27 @@ func TestListenRefusesLiveSocketReplacesStale(t *testing.T) {
 		t.Fatalf("stale socket not replaced: %v", err)
 	}
 	l2.Close()
+}
+
+// A request whose work takes longer than the I/O deadline (a slow service
+// reload) must still be answered: the client used to be told "no answer"
+// while the change went through.
+func TestSlowHandlerIsStillAnswered(t *testing.T) {
+	old := ioTimeout
+	ioTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { ioTimeout = old })
+	sock := filepath.Join(t.TempDir(), "d.sock")
+	l, err := Listen(sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	go Serve(l, func(Peer, Request) Response {
+		time.Sleep(600 * time.Millisecond)
+		return Response{OK: true}
+	})
+	resp, err := Call(sock, Request{Op: "status"})
+	if err != nil || !resp.OK {
+		t.Fatalf("slow answer lost: %+v %v", resp, err)
+	}
 }

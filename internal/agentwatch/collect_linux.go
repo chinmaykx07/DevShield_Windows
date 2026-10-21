@@ -133,13 +133,21 @@ func processModules(pid int32) []string {
 }
 
 // autostartEntries maps executable paths to where they are registered to
-// start automatically: systemd units (user + system) and XDG autostart.
-// (cron @reboot needs root to read other users' crontabs — Phase 2.)
-func autostartEntries() map[string]string {
-	out := map[string]string{}
+// start automatically or on a schedule: systemd units (system, every
+// user's, and drop-in overrides; timers start a .service, which is what is
+// read), XDG autostart, and cron jobs (user crontabs, /etc/crontab,
+// /etc/cron.d).
+func autostartEntries() map[string]string { return autostartEntriesIn("/") }
 
+func autostartEntriesIn(root string) map[string]string {
+	out := map[string]string{}
+	add := func(cmd, where, file string) {
+		if f := strings.Fields(cmd); len(f) > 0 {
+			out[autostartKey(f[0], cmd)] = where + " (" + filepath.Base(file) + ")"
+		}
+	}
 	scan := func(dir, glob, key, where string) {
-		files, _ := filepath.Glob(filepath.Join(dir, glob))
+		files, _ := filepath.Glob(filepath.Join(root, dir, glob))
 		for _, file := range files {
 			data, err := os.ReadFile(file)
 			if err != nil {
@@ -147,24 +155,87 @@ func autostartEntries() map[string]string {
 			}
 			for _, line := range strings.Split(string(data), "\n") {
 				line = strings.TrimSpace(line)
-				if !strings.HasPrefix(line, key) {
-					continue
-				}
-				cmd := strings.TrimLeft(strings.TrimPrefix(line, key), "-@!+:") // systemd prefixes
-				if f := strings.Fields(cmd); len(f) > 0 {
-					out[autostartKey(f[0], cmd)] = where + " (" + filepath.Base(file) + ")"
+				if strings.HasPrefix(line, key) {
+					add(strings.TrimLeft(strings.TrimPrefix(line, key), "-@!+:"), where, file) // systemd prefixes
 				}
 			}
 		}
 	}
-
-	// Every user's entries, not just the daemon's own (it runs as root).
-	homes, _ := filepath.Glob("/home/*")
-	for _, home := range append(homes, "/root") {
-		scan(filepath.Join(home, ".config/systemd/user"), "*.service", "ExecStart=", "systemd user unit")
+	units := func(dir, where string) {
+		scan(dir, "*.service", "ExecStart=", where)
+		scan(dir, "*.service.d/*.conf", "ExecStart=", where+" override")
+	}
+	// Every account's entries, not just the daemon's own (it runs as root).
+	for _, home := range homeDirs(root) {
+		units(filepath.Join(home, ".config/systemd/user"), "systemd user unit")
 		scan(filepath.Join(home, ".config/autostart"), "*.desktop", "Exec=", "XDG autostart")
 	}
-	scan("/etc/systemd/system", "*.service", "ExecStart=", "systemd unit")
+	units("/etc/systemd/system", "systemd unit")
+	units("/etc/systemd/user", "systemd user unit (all users)")
 	scan("/etc/xdg/autostart", "*.desktop", "Exec=", "XDG autostart")
+
+	// cron: user crontabs have no user field, system ones do.
+	cron := func(file string, userField bool) {
+		data, err := os.ReadFile(file)
+		if err != nil {
+			return
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			f := strings.Fields(line)
+			if len(f) == 0 || strings.HasPrefix(f[0], "#") || (strings.Contains(f[0], "=") && !strings.HasPrefix(f[0], "@")) {
+				continue // blank, comment or VAR=value
+			}
+			skip := 5 // minute hour day month weekday
+			if strings.HasPrefix(f[0], "@") {
+				skip = 1 // @reboot, @daily, …
+			}
+			if userField {
+				skip++
+			}
+			if len(f) > skip {
+				add(strings.Join(f[skip:], " "), "cron job", file)
+			}
+		}
+	}
+	for _, glob := range []string{"var/spool/cron/crontabs/*", "var/spool/cron/*"} {
+		files, _ := filepath.Glob(filepath.Join(root, glob))
+		for _, file := range files {
+			if st, err := os.Stat(file); err == nil && st.Mode().IsRegular() {
+				cron(file, false)
+			}
+		}
+	}
+	cron(filepath.Join(root, "etc/crontab"), true)
+	files, _ := filepath.Glob(filepath.Join(root, "etc/cron.d/*"))
+	for _, file := range files {
+		cron(file, true)
+	}
+	return out
+}
+
+// homeDirs lists every account's home from /etc/passwd (homes need not be
+// under /home), plus /home/* and /root, relative to root.
+func homeDirs(root string) []string {
+	seen := map[string]bool{}
+	var out []string
+	addHome := func(h string) {
+		h = filepath.Clean("/" + h)
+		if h != "/" && !seen[h] {
+			seen[h] = true
+			out = append(out, h)
+		}
+	}
+	if data, err := os.ReadFile(filepath.Join(root, "etc/passwd")); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			if f := strings.Split(line, ":"); len(f) >= 6 {
+				addHome(f[5])
+			}
+		}
+	}
+	homes, _ := filepath.Glob(filepath.Join(root, "home/*"))
+	for _, h := range homes {
+		addHome(strings.TrimPrefix(h, filepath.Clean(root)))
+	}
+	addHome("/root")
 	return out
 }

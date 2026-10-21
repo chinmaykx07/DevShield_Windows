@@ -21,6 +21,7 @@
 package lanprivacy
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -28,6 +29,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Drop-in files DevShield owns.
@@ -104,9 +106,15 @@ func (s System) savedOriginals() map[string]string {
 // Runner runs a system command; tests replace it.
 type Runner func(name string, args ...string) (string, error)
 
-// ExecRunner runs real commands.
+// ExecRunner runs real commands, each for at most 20 s (a hung service
+// reload must not hang the daemon's request).
 func ExecRunner(name string, args ...string) (string, error) {
-	out, err := exec.Command(name, args...).CombinedOutput()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
+	if ctx.Err() != nil {
+		err = fmt.Errorf("%s did not finish within 20 s", name)
+	}
 	return string(out), err
 }
 

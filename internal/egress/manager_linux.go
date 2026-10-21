@@ -3,6 +3,7 @@ package egress
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -267,6 +268,15 @@ func (m *Manager) apply() error {
 	return nil
 }
 
+// saveApplied saves after a change already loaded into the kernel. The
+// error says so: the change is in force, only its persistence failed.
+func (m *Manager) saveApplied() error {
+	if err := m.save(); err != nil {
+		return fmt.Errorf("the change is in force now, but saving it failed (%v), so after a restart or reboot DevShield goes back to the previously saved settings", err)
+	}
+	return nil
+}
+
 func (m *Manager) save() error {
 	st := m.st
 	if m.pending != nil {
@@ -362,7 +372,7 @@ func (m *Manager) Block(fp, id, name string, pids []Proc) (moved, flows int, err
 		m.save() // the block itself holds (the group's rule is loaded): remember it
 		return moved, 0, fmt.Errorf("processes are quarantined but cutting their existing connections failed: %w", err)
 	}
-	if err := m.save(); err != nil {
+	if err := m.saveApplied(); err != nil {
 		return moved, len(b.Flows) - n, err
 	}
 	return moved, len(b.Flows) - n, nil
@@ -444,7 +454,7 @@ func (m *Manager) Unblock(fp string) (string, error) {
 	if err := m.apply(); err != nil {
 		return note, err
 	}
-	return note, m.save()
+	return note, m.saveApplied()
 }
 
 // release moves fp's processes out of group back to where they came from
@@ -547,7 +557,7 @@ func (m *Manager) Allow(fp, id, name string, pids []Proc) (int, error) {
 		return 0, err
 	}
 	moved := m.capture(b, pids, AllowedCgroup, false)
-	return moved, m.save()
+	return moved, m.saveApplied()
 }
 
 // Disallow withdraws an allow.
@@ -564,7 +574,7 @@ func (m *Manager) Disallow(fp string) (string, error) {
 	if err := m.apply(); err != nil {
 		return note, err
 	}
-	return note, m.save()
+	return note, m.saveApplied()
 }
 
 // NotQuarantined counts pids that are NOT inside the quarantine group, so
@@ -811,12 +821,24 @@ func (m *Manager) LockdownOn(l Lockdown, confirmWithin time.Duration) error {
 	if confirmWithin > 0 {
 		m.prevLock, m.pendingBy = durable, time.Now().Add(confirmWithin)
 		gen := m.gen
-		m.pending = time.AfterFunc(confirmWithin, func() { m.revertPending(gen) })
+		m.pending = time.AfterFunc(confirmWithin, func() { m.revertPending(gen, "not confirmed in time") })
 	}
-	return m.save()
+	return m.saveApplied()
 }
 
-func (m *Manager) revertPending(gen int) {
+// Stop is called when the daemon stops. The revert timer of an
+// unconfirmed lockdown dies with it, so the lockdown is reverted now, as a
+// restart would do (an unconfirmed lockdown is never saved).
+func (m *Manager) Stop() {
+	m.mu.Lock()
+	gen, pending := m.gen, m.pending != nil
+	m.mu.Unlock()
+	if pending {
+		m.revertPending(gen, "DevShield is stopping before it was confirmed")
+	}
+}
+
+func (m *Manager) revertPending(gen int, why string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.pending == nil || m.gen != gen {
@@ -834,7 +856,7 @@ func (m *Manager) revertPending(gen int) {
 	if err := m.save(); err != nil {
 		m.cfg.Emit("EGRESS_SAVE_FAILED", err.Error(), "fail")
 	}
-	m.cfg.Emit("LOCKDOWN_REVERTED", "not confirmed in time; previous network policy restored", "warn")
+	m.cfg.Emit("LOCKDOWN_REVERTED", why+"; previous network policy restored", "warn")
 }
 
 // Confirm keeps a pending lockdown.
@@ -847,7 +869,7 @@ func (m *Manager) Confirm() error {
 	m.pending.Stop()
 	m.pending = nil
 	m.gen++
-	return m.save()
+	return m.saveApplied()
 }
 
 // LockdownOff removes the lockdown (quarantine stays).
@@ -868,7 +890,7 @@ func (m *Manager) LockdownOff() error {
 		m.pending = nil
 	}
 	m.gen++
-	return m.save()
+	return m.saveApplied()
 }
 
 // Reset undoes everything: releases blocked and allowed agents back to
@@ -930,7 +952,7 @@ func (m *Manager) Reset() ([]string, error) {
 		did = append(did, "unreadable network state replaced")
 		m.corrupt = nil
 	}
-	if err := m.save(); err != nil {
+	if err := m.saveApplied(); err != nil {
 		return did, err
 	}
 	if len(stuck) > 0 {
@@ -1085,9 +1107,14 @@ func nftBinary() string {
 	return "nft"
 }
 
+// nftTimeout bounds each nft run, so a hung nft can't hang the daemon.
+const nftTimeout = 20 * time.Second
+
 // listNft prints DevShield's table from the kernel.
 func listNft() (string, error) {
-	out, err := exec.Command(nftBinary(), "list", "table", "inet", TableName).CombinedOutput()
+	ctx, cancel := context.WithTimeout(context.Background(), nftTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, nftBinary(), "list", "table", "inet", TableName).CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
 	}
@@ -1101,7 +1128,9 @@ func runNft(script string, check bool) error {
 	if check {
 		args = []string{"-c", "-f", "-"}
 	}
-	cmd := exec.Command(bin, args...)
+	ctx, cancel := context.WithTimeout(context.Background(), nftTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.Stdin = strings.NewReader(script)
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out

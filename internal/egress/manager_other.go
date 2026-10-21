@@ -73,3 +73,4 @@ func (*Manager) LockdownOff() error                                     { return
 func (*Manager) Status() Status                                         { return Status{} }
 func (*Manager) Reset() ([]string, error)                               { return nil, errUnsupported }
 func (*Manager) EnsureLoaded() (bool, error)                            { return false, errUnsupported }
+func (*Manager) Stop()                                                  {}

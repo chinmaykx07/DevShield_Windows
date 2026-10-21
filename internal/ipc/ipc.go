@@ -27,9 +27,16 @@ import (
 // DefaultSocket is where the Linux daemon listens.
 const DefaultSocket = "/run/devshield/devshield.sock"
 
-const (
-	maxRequestBytes = 64 << 10
-	ioTimeout       = 10 * time.Second
+const maxRequestBytes = 64 << 10
+
+// ioTimeout bounds reading a request and writing an answer. The work in
+// between is not bounded here (its slow parts, nft and service reloads,
+// have their own limits): a slow change used to be applied while the
+// client was told "no answer". answerTimeout is how long a client waits.
+// Variables so tests can shorten them.
+var (
+	ioTimeout     = 10 * time.Second
+	answerTimeout = 60 * time.Second
 )
 
 // Request is what a client asks for.
@@ -197,7 +204,7 @@ func Serve(l net.Listener, h Handler) error {
 
 func handle(conn net.Conn, h Handler) {
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(ioTimeout))
+	_ = conn.SetReadDeadline(time.Now().Add(ioTimeout))
 
 	peer, err := peerOf(conn)
 	if err != nil {
@@ -216,7 +223,9 @@ func handle(conn net.Conn, h Handler) {
 		writeResponse(conn, Response{Error: "malformed request"})
 		return
 	}
-	writeResponse(conn, h(peer, req))
+	resp := h(peer, req)
+	_ = conn.SetWriteDeadline(time.Now().Add(ioTimeout))
+	writeResponse(conn, resp)
 }
 
 func writeResponse(w io.Writer, r Response) {
@@ -231,7 +240,7 @@ func Call(socketPath string, req Request) (Response, error) {
 		return Response{}, fmt.Errorf("cannot reach the DevShield daemon at %s: %w", socketPath, err)
 	}
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(ioTimeout))
+	_ = conn.SetDeadline(time.Now().Add(answerTimeout))
 
 	b, _ := json.Marshal(req)
 	if _, err := conn.Write(append(b, '\n')); err != nil {

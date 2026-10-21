@@ -193,7 +193,7 @@ func TestThermalProfileThroughDaemon(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer d.close()
+	defer func() { d.close() }()
 	readSys := func(rel string) string {
 		b, _ := os.ReadFile(filepath.Join(sys, rel))
 		return strings.TrimSpace(string(b))
@@ -215,11 +215,25 @@ func TestThermalProfileThroughDaemon(t *testing.T) {
 		readSys("sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq") != "2800000" {
 		t.Fatalf("silent via daemon: %+v", r)
 	}
+
+	// A reboot resets the kernel's values; the next start puts the
+	// profile back instead of claiming it while it isn't in effect.
+	d.close()
+	os.WriteFile(filepath.Join(sys, "sys/devices/system/cpu/cpufreq/boost"), []byte("1\n"), 0o644)
+	os.WriteFile(filepath.Join(sys, "sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq"), []byte("4000000\n"), 0o644)
+	d, err = start(d.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if readSys("sys/devices/system/cpu/cpufreq/boost") != "0" || readSys("sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq") != "2800000" ||
+		!strings.Contains(strings.Join(lastActions(t, d, 3), " "), "THERMAL_PROFILE_REAPPLIED") {
+		t.Fatalf("profile not re-applied after a reboot: %v", lastActions(t, d, 3))
+	}
 	r = d.handle(ipc.Peer{UID: 0}, ipc.Request{Op: "profile", Profile: "off"})
 	if !r.OK || readSys("sys/devices/system/cpu/cpufreq/boost") != "1" || readSys("sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq") != "4000000" {
 		t.Fatalf("off via daemon: %+v", r)
 	}
-	got := strings.Join(lastActions(t, d, 3), "\n")
+	got := strings.Join(lastActions(t, d, 20), "\n")
 	if !strings.Contains(got, "THERMAL_PROFILE_APPLIED") || !strings.Contains(got, "THERMAL_RESTORED") {
 		t.Fatalf("thermal changes not in the audit log:\n%s", got)
 	}

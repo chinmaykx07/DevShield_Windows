@@ -40,8 +40,11 @@ ProtectSystem=strict
 # telemetry sinkhole's managed block in /etc/hosts, and its own drop-in
 # files for LAN privacy. Everything else under /etc stays read-only. The
 # drop-in directories are created first (with full privileges, "+") so they
-# can be bind-mounted writable; "-" skips NetworkManager's if it is absent.
+# can be bind-mounted writable. NetworkManager's is created only if
+# NetworkManager is installed ("-" then skips it when absent); without that,
+# an installed NetworkManager lacking conf.d made "lan-privacy on" fail.
 ExecStartPre=+/bin/mkdir -p /etc/systemd/resolved.conf.d /etc/sysctl.d
+ExecStartPre=+/bin/sh -c 'if [ -d /etc/NetworkManager ]; then mkdir -p /etc/NetworkManager/conf.d; fi'
 ReadWritePaths=/etc/hosts /etc/systemd/resolved.conf.d /etc/sysctl.d -/etc/NetworkManager/conf.d
 ProtectHome=read-only
 # No PrivateTmp: rogue agents often live in /tmp, and the daemon must see
