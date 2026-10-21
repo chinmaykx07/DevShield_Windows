@@ -81,19 +81,19 @@ Run it in **Go** with **gopsutil** (already used by `context.go`), *not* as a Po
 5. **UI:** a tray submenu **"🤖 AI Agents (N running)"** listing what's running, with an alert toast for new or unknown ones. Actions: *Approve* (trust this exe+hash), *Ignore*, and *Open file location*. **No auto-kill** in phase 1: alert only, as Defender's discovery does.
 
 ### 4b. As built: behaviour-first rogue detection
-Rogue agents are by definition undocumented, or a known agent misused by a bad actor, so **no list can be the detector**. Agent Watch scores every process on behaviour, ignoring its name:
+Rogue agents are by definition undocumented, or a known agent misused by a bad actor, so **no list can be the only detector**. Agent Watch scores every process on behaviour, and *also* recognises catalogued agents by identity (see below):
 
 | Agent-likeness signal | Points |
 |---|---|
-| Serves a model on a local LLM port | 3 |
+| Serves a model on a distinctive local LLM port (e.g. Ollama 11434) | 3 (1 on ports web servers also use: 8080, 1234, 1337…) |
 | In-process AI libraries (llama.cpp/ggml, CTranslate2, MLC; PyTorch/OpenVINO/TF score 2; ONNX Runtime 1) | 1–3 |
 | Connected to an LLM API host | 2 |
-| Client of a local model server | 2 |
-| LLM keys/endpoints set **for this process** (globally inherited vars ignored) | 2 |
-| Agent loop: ≥3 shells/tools launched in 5 min (credited through shells) | 2 (1 for 1–2) |
-| Agent framework named in the command line (weak, easily removed) | 1 |
+| Client of a local model server | 2 (1 on common ports) |
+| LLM keys/endpoints set **for this process** (inherited ones ignored; skipped when the parent can't be read) | 2 |
+| Agent loop: ≥3 shells/tools launched in 5 min (credited through non-interactive shells; the program's own worker copies don't count) | 2 (1 for 1–2) |
+| Agent framework in the program's or script's name (weak, easily removed) | 1 |
 
-A process at **≥3** is an agent. Shells and terminals launching tools are excluded, since that is a human typing. Then **rogue indicators** are checked for every agent, catalogued or not: undocumented · unusual location · approvals-disabled flags · recon/persistence/credential tools launched · auto-start registration · detached. Verdict: **rogue** = unsanctioned + any indicator (an undocumented agent is a rogue until sanctioned). **Risky** = sanctioned but showing behavioural indicators.
+A process at **≥3** is an agent. **A catalog match also makes a process an agent, at any score.** The match is on its identity: the executable, and for runtimes the script or package it runs, never its other arguments. A catalog name removes the "undocumented" indicator, so a rogue that borrows a known name shows as ⚠ unsanctioned rather than 🚨 rogue, though it is never trusted: approval is per exact program file. Shells and terminals launching tools are excluded, since that is a human typing, and so are interactive shells inside IDEs on Linux. Then **rogue indicators** are checked for every agent, catalogued or not: undocumented · unusual location · approvals-disabled flags · recon/persistence/credential tools launched · auto-start registration · detached. Verdict: **rogue** = unsanctioned + any indicator (an undocumented agent is a rogue until sanctioned). **Risky** = sanctioned but showing behavioural indicators.
 
 Known gaps:
 - Polling at 0.5 s misses very short commands.

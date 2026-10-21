@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -67,6 +68,8 @@ type Manager struct {
 	pending   *time.Timer // lockdown awaiting confirmation
 	pendingBy time.Time
 	prevLock  *Lockdown // restored if a pending lockdown is not confirmed
+	gen       int       // bumped on every lockdown change; a stale timer must not revert a newer one
+	corrupt   error     // the saved state could not be read: keep the kernel as it is
 }
 
 // Status is what the egress controls look like right now.
@@ -79,6 +82,7 @@ type Status struct {
 	QuarantinedProcs int         `json:"quarantined_processes"`
 	Allowed          []BlockInfo `json:"allowed,omitempty"`
 	AllowedProcs     int         `json:"allowed_processes"`
+	Problem          string      `json:"problem,omitempty"` // e.g. unreadable saved state
 }
 
 // BlockInfo is the client view of one blocked agent.
@@ -118,7 +122,14 @@ func New(cfg Config) (*Manager, error) {
 	}
 	if err == nil {
 		if err := json.Unmarshal(data, &m.st); err != nil {
-			return nil, fmt.Errorf("egress state %s: %w", m.statePath(), err)
+			// Fail closed: whatever rules the kernel holds stay as they are
+			// (a lockdown must not silently open), and every change except
+			// restore-all is refused until the owner decides.
+			aside := fmt.Sprintf("%s.corrupt-%d", m.statePath(), time.Now().Unix())
+			os.Rename(m.statePath(), aside)
+			m.st = state{Blocked: map[string]*Member{}, Allowed: map[string]*Member{}}
+			m.corrupt = fmt.Errorf("network state file was unreadable (%v; kept as %s). The rules already in the kernel stay as they are; run 'sudo devshield restore-all' to start clean", err, aside)
+			return m, m.corrupt
 		}
 		if m.st.Blocked == nil {
 			m.st.Blocked = map[string]*Member{}
@@ -232,7 +243,13 @@ func (m *Manager) apply() error {
 }
 
 func (m *Manager) save() error {
-	data, err := json.MarshalIndent(m.st, "", "  ")
+	st := m.st
+	if m.pending != nil {
+		// An unconfirmed lockdown is never persisted: after a restart or
+		// reboot the previous, confirmed policy must come back, not it.
+		st.Lockdown = m.prevLock
+	}
+	data, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -254,6 +271,9 @@ func (m *Manager) save() error {
 func (m *Manager) Block(fp, id, name string, pids []Proc) (moved, flows int, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.corrupt != nil {
+		return 0, 0, m.corrupt
+	}
 	if m.cgRoot == "" {
 		return 0, 0, errors.New("network quarantine needs the cgroup v2 hierarchy (unified cgroups), which is not mounted on this system")
 	}
@@ -286,6 +306,7 @@ func (m *Manager) Block(fp, id, name string, pids []Proc) (moved, flows int, err
 	n := len(b.Flows)
 	m.refreshFlows(b)
 	if err := m.apply(); err != nil {
+		m.save() // the block itself holds (the group's rule is loaded): remember it
 		return moved, 0, fmt.Errorf("processes are quarantined but cutting their existing connections failed: %w", err)
 	}
 	if err := m.save(); err != nil {
@@ -359,6 +380,9 @@ func (m *Manager) refreshFlows(b *Member) {
 func (m *Manager) Unblock(fp string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.corrupt != nil {
+		return m.corrupt
+	}
 	if m.st.Blocked[fp] == nil {
 		return errors.New("that agent is not blocked")
 	}
@@ -373,16 +397,44 @@ func (m *Manager) Unblock(fp string) error {
 // and forgets it (caller holds mu, then applies and saves).
 func (m *Manager) release(set map[string]*Member, fp, group string) {
 	b := set[fp]
-	if m.cgRoot != "" {
-		pp := parents(m.cfg.ProcRoot)
-		for _, pid := range m.members(group) {
-			if origin, ok := originFor(pp, pid, b.Origins); ok {
-				m.moveTo(pid, origin)
+	delete(set, fp)
+	if m.cgRoot == "" {
+		return
+	}
+	pp := parents(m.cfg.ProcRoot)
+	fellBack, orphans := 0, 0
+	for _, pid := range m.members(group) {
+		if origin, ok := originFor(pp, pid, b.Origins); ok {
+			if !m.moveTo(pid, origin) {
+				fellBack++
+			}
+			continue
+		}
+		if group != AllowedCgroup {
+			continue // unknown processes stay quarantined: fail closed
+		}
+		// In the allowed group an untraceable process (e.g. a helper that
+		// daemonized) must not keep the allowance unless another allowed
+		// agent accounts for it.
+		owned := false
+		for _, other := range set {
+			if _, ok := originFor(pp, pid, other.Origins); ok {
+				owned = true
+				break
 			}
 		}
+		if !owned {
+			m.moveTo(pid, "/")
+			orphans++
+		}
 	}
-	delete(set, fp)
-	if len(set) == 0 && m.cgRoot != "" {
+	if fellBack > 0 {
+		m.cfg.Emit("EGRESS_RELEASE_FALLBACK", fmt.Sprintf("%d process(es) of %s could not return to their original cgroup and were placed in the root cgroup (outside their session's limits)", fellBack, b.ID), "warn")
+	}
+	if orphans > 0 {
+		m.cfg.Emit("EGRESS_RELEASE_ORPHANS", fmt.Sprintf("%d untraceable process(es) left the allowed group with %s and lost the allowance", orphans, b.ID), "warn")
+	}
+	if len(set) == 0 {
 		os.Remove(m.groupDir(group)) // fails (and the rule stays) while anything is still inside
 	}
 }
@@ -395,6 +447,9 @@ func (m *Manager) release(set map[string]*Member, fp, group string) {
 func (m *Manager) Allow(fp, id, name string, pids []Proc) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.corrupt != nil {
+		return 0, m.corrupt
+	}
 	if m.cgRoot == "" {
 		return 0, errors.New("allowing single agents needs the cgroup v2 hierarchy (unified cgroups), which is not mounted on this system")
 	}
@@ -426,6 +481,9 @@ func (m *Manager) Allow(fp, id, name string, pids []Proc) (int, error) {
 func (m *Manager) Disallow(fp string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.corrupt != nil {
+		return m.corrupt
+	}
 	if m.st.Allowed[fp] == nil {
 		return errors.New("that agent is not allowed")
 	}
@@ -459,11 +517,16 @@ func isDevShieldGroup(cg string) bool {
 }
 
 // moveTo puts pid back into origin, or the root group if origin is gone.
-func (m *Manager) moveTo(pid int, origin string) {
+// moveTo puts pid back into origin; if that fails (the group is gone, or
+// owned by the user and not writable), into the root group. It reports
+// whether the process reached origin.
+func (m *Manager) moveTo(pid int, origin string) bool {
 	dir := filepath.Join(m.cgRoot, filepath.Clean("/"+origin))
 	if err := os.WriteFile(filepath.Join(dir, "cgroup.procs"), []byte(strconv.Itoa(pid)), 0); err != nil {
 		os.WriteFile(filepath.Join(m.cgRoot, "cgroup.procs"), []byte(strconv.Itoa(pid)), 0)
+		return false
 	}
+	return true
 }
 
 // Reconcile re-quarantines blocked agents whose processes (re)appeared
@@ -472,7 +535,7 @@ func (m *Manager) moveTo(pid int, origin string) {
 func (m *Manager) Reconcile(running map[string][]Proc) []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.cgRoot == "" {
+	if m.cgRoot == "" || m.corrupt != nil {
 		return nil
 	}
 	changed := m.tidy()
@@ -523,7 +586,14 @@ func (m *Manager) Reconcile(running map[string][]Proc) []string {
 // program that uses it). It reports whether the ruleset needs reloading.
 // Caller holds mu.
 func (m *Manager) tidy() bool {
-	live := liveFlows(m.cfg.ProcRoot)
+	// A flow stays only while a quarantined process still owns that socket
+	// (an unrelated program reusing the port must not inherit the rule).
+	live := map[Flow]bool{}
+	if m.cgRoot != "" {
+		for _, f := range OpenFlows(m.cfg.ProcRoot, m.members(QuarantineCgroup)) {
+			live[f] = true
+		}
+	}
 	changed := false
 	for _, b := range m.st.Allowed {
 		for pid := range b.Origins {
@@ -622,49 +692,60 @@ func (m *Manager) cgroupOf(pid int) string {
 
 // LockdownOn restricts all outbound traffic to l. With confirmWithin > 0
 // the change reverts by itself unless Confirm is called in time (a
-// dead-man switch for remote sessions and untested tunnels).
+// dead-man switch for remote sessions and untested tunnels). The pending
+// change is never written to disk, so a restart also reverts it.
 func (m *Manager) LockdownOn(l Lockdown, confirmWithin time.Duration) error {
 	if err := l.Validate(); err != nil {
 		return err
 	}
+	if confirmWithin < 0 || (confirmWithin > 0 && confirmWithin < MinConfirm) {
+		return fmt.Errorf("--confirm-within must be at least %s", MinConfirm)
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	prev := m.st.Lockdown
-	if m.pending != nil {
-		m.pending.Stop()
-		prev = m.prevLock
+	if m.corrupt != nil {
+		return m.corrupt
 	}
+	durable := m.st.Lockdown // what survives a restart
+	if m.pending != nil {
+		durable = m.prevLock
+	}
+	inKernel := m.st.Lockdown
 	m.st.Lockdown = &l
 	if err := m.apply(); err != nil {
-		m.st.Lockdown = prev
+		m.st.Lockdown = inKernel // nft is atomic: the kernel still has this; any pending timer stays armed
 		return err
 	}
-	if confirmWithin <= 0 {
+	if m.pending != nil {
+		m.pending.Stop()
 		m.pending = nil
-		return m.save()
 	}
-	m.prevLock, m.pendingBy = prev, time.Now().Add(confirmWithin)
-	m.pending = time.AfterFunc(confirmWithin, m.revertPending)
-	// Persist the PREVIOUS lockdown: if the daemon restarts before the
-	// confirmation, the unconfirmed change must not come back.
-	cur := m.st.Lockdown
-	m.st.Lockdown = prev
-	err := m.save()
-	m.st.Lockdown = cur
-	return err
+	m.gen++
+	if confirmWithin > 0 {
+		m.prevLock, m.pendingBy = durable, time.Now().Add(confirmWithin)
+		gen := m.gen
+		m.pending = time.AfterFunc(confirmWithin, func() { m.revertPending(gen) })
+	}
+	return m.save()
 }
 
-func (m *Manager) revertPending() {
+func (m *Manager) revertPending(gen int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.pending == nil {
+	if m.pending == nil || m.gen != gen {
+		return // confirmed, replaced or switched off meanwhile
+	}
+	cur := m.st.Lockdown
+	m.st.Lockdown = m.prevLock
+	if err := m.apply(); err != nil {
+		m.st.Lockdown = cur
+		m.cfg.Emit("LOCKDOWN_REVERT_FAILED", err.Error()+" — the unconfirmed lockdown is still active; run 'sudo devshield lockdown off'", "fail")
 		return
 	}
 	m.pending = nil
-	m.st.Lockdown = m.prevLock
-	if err := m.apply(); err != nil {
-		m.cfg.Emit("LOCKDOWN_REVERT_FAILED", err.Error(), "fail")
-		return
+	m.gen++
+	if err := m.save(); err != nil {
+		m.cfg.Emit("EGRESS_SAVE_FAILED", err.Error(), "fail")
 	}
 	m.cfg.Emit("LOCKDOWN_REVERTED", "not confirmed in time; previous network policy restored", "warn")
 }
@@ -678,6 +759,7 @@ func (m *Manager) Confirm() error {
 	}
 	m.pending.Stop()
 	m.pending = nil
+	m.gen++
 	return m.save()
 }
 
@@ -685,14 +767,20 @@ func (m *Manager) Confirm() error {
 func (m *Manager) LockdownOff() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.corrupt != nil {
+		return m.corrupt
+	}
+	cur := m.st.Lockdown
+	m.st.Lockdown = nil
+	if err := m.apply(); err != nil {
+		m.st.Lockdown = cur // still in the kernel: say so rather than pretend
+		return err
+	}
 	if m.pending != nil {
 		m.pending.Stop()
 		m.pending = nil
 	}
-	m.st.Lockdown = nil
-	if err := m.apply(); err != nil {
-		return err
-	}
+	m.gen++
 	return m.save()
 }
 
@@ -703,10 +791,7 @@ func (m *Manager) Reset() ([]string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var did []string
-	if m.pending != nil {
-		m.pending.Stop()
-		m.pending = nil
-	}
+	cur := m.st.Lockdown
 	if m.st.Lockdown != nil {
 		m.st.Lockdown = nil
 		did = append(did, "lockdown ended")
@@ -736,7 +821,17 @@ func (m *Manager) Reset() ([]string, error) {
 		}
 	}
 	if err := m.apply(); err != nil {
+		m.st.Lockdown = cur // the kernel still enforces it
 		return did, err
+	}
+	if m.pending != nil {
+		m.pending.Stop()
+		m.pending = nil
+	}
+	m.gen++
+	if m.corrupt != nil {
+		did = append(did, "unreadable network state replaced")
+		m.corrupt = nil
 	}
 	if err := m.save(); err != nil {
 		return did, err
@@ -754,6 +849,9 @@ func (m *Manager) Status() Status {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	st := Status{CgroupV2: m.cgRoot != "", Lockdown: m.st.Lockdown, RulesLoaded: m.rulesLoaded()}
+	if m.corrupt != nil {
+		st.Problem, st.RulesLoaded = m.corrupt.Error(), false
+	}
 	if m.pending != nil {
 		st.ConfirmBy = m.pendingBy
 	}
@@ -772,51 +870,54 @@ func (m *Manager) Status() Status {
 	return st
 }
 
-// rulesLoaded checks the kernel has exactly our rules: not only that the
-// table exists, but that no rule in it was removed, added, reordered or
-// had its verdict changed.
+// rulesLoaded checks the kernel holds exactly the rules DevShield wants:
+// every rule of every chain, in order, compared as canonical token sets
+// (see canonRules), so a deleted, added, reordered or edited rule —
+// address, port, group, user or verdict — is noticed. With nothing to
+// enforce, the table must be absent.
 func (m *Manager) rulesLoaded() bool {
 	p := m.policy()
+	have, listErr := m.cfg.NftList()
 	if p.Empty() {
-		return true
+		return listErr != nil // no table expected
 	}
 	want, err := Render(p)
-	if err != nil {
+	if err != nil || listErr != nil {
 		return false
 	}
-	have, err := m.cfg.NftList()
-	if err != nil {
-		return false
-	}
-	return slices.Equal(ruleShape(want), ruleShape(have))
+	return slices.Equal(canonRules(want), canonRules(have))
 }
 
-// ruleShape reduces a chain to one "first-word verdict" entry per rule.
-// It reads both our rendered script and nft's listing (which adds counter
-// values and limit bursts but keeps each rule on one line, in order).
-func ruleShape(chain string) []string {
+var (
+	reCounter = regexp.MustCompile(`counter packets \d+ bytes \d+`)
+	reBurst   = regexp.MustCompile(`burst \d+ packets`)
+)
+
+// canonRules reduces a table to one entry per chain header and per rule.
+// It reads both DevShield's script and nft's listing, which differs only
+// in ways that do not change meaning: counter values, the default limit
+// burst, set elements sorted, and matches within a rule reordered (see
+// testdata/). Each rule becomes its sorted tokens.
+func canonRules(table string) []string {
 	var out []string
-	in := false
-	for _, line := range strings.Split(chain, "\n") {
+	inTable := false
+	for _, line := range strings.Split(table, "\n") {
 		line = strings.TrimSpace(line)
 		switch {
-		case strings.HasPrefix(line, "chain egress"):
-			in = true
+		case strings.HasPrefix(line, "table inet "+TableName+" {"):
+			inTable = true
 			continue
-		case !in || line == "" || strings.HasPrefix(line, "type "):
+		case !inTable || line == "" || line == "}" || strings.HasPrefix(line, "type "):
 			continue
-		case line == "}":
-			return out
+		case strings.HasPrefix(line, "chain "):
+			out = append(out, line)
+			continue
 		}
-		if i := strings.Index(line, ` comment "`); i >= 0 {
-			line = line[:i]
-		}
-		f := strings.Fields(line)
-		verdict := f[len(f)-1]
-		if verdict != "accept" && verdict != "drop" {
-			verdict = "-"
-		}
-		out = append(out, f[0]+" "+verdict)
+		line = reCounter.ReplaceAllString(line, "counter")
+		line = reBurst.ReplaceAllString(line, "")
+		f := strings.Fields(strings.NewReplacer("{", " ", "}", " ", ",", " ").Replace(line))
+		sort.Strings(f)
+		out = append(out, strings.Join(f, " "))
 	}
 	return out
 }
@@ -826,7 +927,7 @@ func ruleShape(chain string) []string {
 func (m *Manager) EnsureLoaded() (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.rulesLoaded() {
+	if m.corrupt != nil || m.rulesLoaded() {
 		return false, nil
 	}
 	return true, m.apply()
@@ -857,9 +958,9 @@ func nftBinary() string {
 	return "nft"
 }
 
-// listNft prints DevShield's chain from the kernel.
+// listNft prints DevShield's table from the kernel.
 func listNft() (string, error) {
-	out, err := exec.Command(nftBinary(), "list", "chain", "inet", TableName, "egress").CombinedOutput()
+	out, err := exec.Command(nftBinary(), "list", "table", "inet", TableName).CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
 	}

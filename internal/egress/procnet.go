@@ -160,14 +160,3 @@ func OpenFlows(procRoot string, pids []int) []Flow {
 	}
 	return out
 }
-
-// liveFlows is every flow that still has a socket on the system.
-func liveFlows(procRoot string) map[Flow]bool {
-	out := map[Flow]bool{}
-	for _, s := range readSockets(procRoot) {
-		if f, ok := flowOf(s); ok {
-			out[f] = true
-		}
-	}
-	return out
-}

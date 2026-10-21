@@ -30,6 +30,7 @@ type Status struct {
 	QuarantinedProcs int         `json:"quarantined_processes"`
 	Allowed          []BlockInfo `json:"allowed,omitempty"`
 	AllowedProcs     int         `json:"allowed_processes"`
+	Problem          string      `json:"problem,omitempty"` // e.g. unreadable saved state
 }
 
 // BlockInfo is the client view of one blocked agent.

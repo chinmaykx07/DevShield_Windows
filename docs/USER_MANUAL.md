@@ -2,6 +2,8 @@
 
 This is the complete reference for using DevShield safely and, once you're comfortable, powerfully. Read Section 1 and 2 fully before your first real use. Sections 3 and 4 are there when you need them.
 
+> **Status, honestly.** Sections 1–4 describe the **Windows** variant, which has never been run on a real Windows machine and has known-broken core features: scheduled-task setup (C1, C2), tray actions (C3), rollback (C4), the network guardian (C5) and the Tor kill switch (C6). See `docs/REVIEW_NOTES_2026-10-20.md`. Section 2b describes the **Linux** daemon, where development is focused now. Each Linux feature there states how it was tested.
+
 ---
 
 ## 1. Before You Start
@@ -15,11 +17,11 @@ This is the complete reference for using DevShield safely and, once you're comfo
 | Hosts file | Telemetry domains redirected to 0.0.0.0 | Privacy enforcer |
 | Registry | Privacy-related keys including telemetry and feedback settings | Privacy enforcer |
 | Services | DiagTrack (disabled, not deleted) | Privacy enforcer |
-| Windows Firewall | Tor kill-switch rules (only if you run Tor hardening) | Tor hardening |
-| Task Scheduler | Six tasks under a `DevShield` folder | First run |
+| Windows Firewall | Tor rules (only if you run Tor hardening). **Currently only *allow* rules: nothing is blocked (C6)** | Tor hardening |
+| Task Scheduler | Six tasks under a `DevShield` folder. **Registration currently always fails (C1)** | First run |
 | Network monitoring | Read-only monitoring of connections | Network guardian |
 
-Every single one of these is reversible. See Section 4.
+These are designed to be reversible, but **the Windows rollback script is currently broken**: it restores nothing and still reports success (C4). Create a Windows restore point before using DevShield on Windows.
 
 ### What DevShield will never touch
 
@@ -54,6 +56,8 @@ pwsh -File scripts\profiles\profile_manager.ps1 -History
 
 ### How to use rollback safely — always dry-run first
 
+> **Currently broken (C4):** rollback restores nothing and still reports success. A dry run won't reveal this. Until it's fixed, rely on a Windows restore point.
+
 ```powershell
 pwsh -File scripts\hardening\rollback.ps1 -DryRun -All
 pwsh -File scripts\hardening\rollback.ps1 -All
@@ -69,27 +73,31 @@ pwsh -File scripts\hardening\rollback.ps1 -Type privacy
 
 ### What to do if you see a guardian alert you don't understand
 
-A guardian alert means a process made a network connection that is neither trusted nor known. This is informational, not a block.
+A guardian alert means a process made a network connection that is neither trusted nor known. This is informational, not a block. **Currently broken (C5):** the guardian's main loop crashes on the first unknown process, so these alerts never fire.
 
 ### Watching AI agents and catching rogue ones (Agent Watch)
 
-The tray menu **🤖 AI Agents** lists every AI agent running on this PC, and flags **rogue suspects**. It scans continuously without admin rights.
+On Windows, the tray menu **🤖 AI Agents** lists the AI agents running on this PC and flags **rogue suspects** (not yet tested on Windows). On Linux, use `devshield agents` (section 2b). It scans continuously.
 
-**Detection is based on behaviour, not names.** A rogue agent won't be in any list, and a bad actor can rename a known one. So a process counts as an AI agent because of what it does:
-- it talks to an LLM API or a local model server (Ollama, LM Studio…)
-- it has LLM API keys or endpoints set specifically for it (keys set for your whole account are ignored)
-- it loads AI model libraries (llama.cpp/ggml, PyTorch, ONNX Runtime…)
-- it keeps launching shells and command-line tools: the "agent loop". Tools run through a shell (`agent → pwsh → tool`) count for the agent.
+**How a process becomes "an AI agent".** Either way below is enough:
+1. **Behaviour** (a score of 3 or more). This catches agents no list knows about:
+   - it talks to an LLM API (+2) or a local model server (+2; only +1 on ports every web server also uses, such as 8080)
+   - it serves a model on a distinctive model port such as Ollama's 11434 (+3); 8080, 1234 and 1337 count only +1
+   - it has LLM API keys or endpoints set specifically for it (+2). Keys set for your whole account are ignored, and if its parent can't be read this signal is skipped rather than guessed
+   - it loads AI model libraries such as llama.cpp/ggml, PyTorch or ONNX Runtime (+1 to +3)
+   - it keeps launching shells and command-line tools, the "agent loop" (+1 or +2). Tools run through a non-interactive shell (`agent → bash -c → tool`) count for the agent. On Linux, what a person types in a terminal, including an IDE's built-in terminal, does not, and neither do worker copies of the program itself (such as PyTorch data loaders)
+   - its program or script name contains a known agent keyword (+1)
+2. **Catalog identity**: its program, or the script or package a runtime such as node, python, uvx or java runs, matches a built-in entry (Claude Code, Codex, Ollama, MCP servers…). Only what the program *is* counts: arguments such as a file it greps, a folder it opens or a package it installs never do.
 
-The built-in catalog (Claude Code, Codex, Cursor, Ollama…) only adds a name label. It never makes an agent trusted.
+A catalog name never makes an agent trusted. It does, however, remove the "undocumented" indicator, so a rogue program that names itself `claude` shows as "Claude Code — ⚠ unsanctioned" rather than 🚨 rogue. Approval is tied to the exact program file and location, so such an impostor is never ✅ unless you approve that exact file.
 
 **Rogue indicators** apply to every agent, named or not:
 - **undocumented**: matches no catalog entry
-- runs from Temp, Downloads, Public or the Recycle Bin
+- runs from Temp, Downloads, Public, the Recycle Bin, `/tmp` or `/dev/shm`. This applies to the program and to the script it runs
 - started with approvals switched off (`--dangerously-skip-permissions`, `--yolo`, `--full-auto`…)
-- launched recon, persistence or credential tools (`whoami`, `net`, `schtasks`, `reg`, `certutil`, `cmdkey`…)
-- registered to start automatically (Run keys, Startup folder)
-- detached: still launching tools after its parent process is gone
+- launched recon, persistence or credential tools (`whoami`, `net`, `schtasks`, `reg`, `certutil`, `cmdkey`, `id`, `sudo`, `crontab`…). These are recognised by name, so a renamed copy is not
+- registered to start automatically: Windows Run keys and the Startup folder, or on Linux, systemd units and XDG autostart for every user. For node, python and the like, the entry must start the same script
+- detached: still launching tools after its parent process is gone (a weak signal: a double-forked process can avoid it)
 
 | Icon | Verdict | Meaning |
 |---|---|---|
@@ -98,27 +106,22 @@ The built-in catalog (Claude Code, Codex, Cursor, Ollama…) only adds a name la
 | ⚠ | **Unsanctioned** | Known agent, nothing suspicious, not yet approved. |
 | ✅ | **Sanctioned** | Approved and behaving normally. |
 
-Hover an entry to see *why* it is considered an agent and which rogue indicators it shows. **Sanction this agent** approves that exact program. Sanctioning clears only the "undocumented" indicator: behavioural indicators still alert, and a changed program file revokes the approval.
+Hover an entry to see *why* it is considered an agent and which rogue indicators it shows. **Sanction this agent** approves that exact program: the same executable, plus for runtimes the same script and the same extra code options (so `node --require=other.js cli.js` is not the approved `cli.js`).
+
+Sanctioning clears the "undocumented" and "auto-start" indicators, since you approved what the agent is and how it is installed. Behavioural indicators still alert. A changed program or script file revokes the approval; the check uses the file's hash, re-read when its size or modification time changes.
+
+The trade-off: if an approved agent *later* adds itself to auto-start, this indicator won't flag it.
 
 Audit events: `AGENT_ROGUE_SUSPECT`, `AGENT_RISKY`, `AGENT_NEW`, `AGENT_UNKNOWN`, `AGENT_CHANGED`, `AGENT_UNSANCTIONED_START`, `AGENT_SANCTIONED`.
 
 **Limits:**
-- Agent Watch only alerts. It never stops or blocks anything.
-- Without admin it can't fully inspect other users' or elevated processes.
+- Agent Watch only alerts. To cut an agent off the network on Linux, use `sudo devshield block <ID>` (section 2b).
+- Without admin (or root) it can't fully inspect other users' or elevated processes.
+- On Windows it has never been run on a real machine.
 - Commands that finish in well under half a second may be missed, because the process list is sampled every 0.5 s. Event-based capture that catches every process is planned for the admin-mode phase.
 - Command lines are redacted (keys and tokens masked) before logging, and environment variable *values* are never stored.
 
----|---|
-| ✅ | Sanctioned. No alerts while its program file stays the same. |
-| ⚠ | Known agent, not yet sanctioned. |
-| ❓ | Not in the catalog, but behaving like an AI agent (e.g. calling an LLM API and running shells). Check it. |
-
-To approve an agent, open its entry and select **Sanction this agent**. Agent Watch writes an audit event (visible in the audit log) when:
-- an agent appears for the first time (`AGENT_NEW`, or `AGENT_UNKNOWN` for ❓ processes)
-- a sanctioned agent's program file changes, which removes its approval (`AGENT_CHANGED`)
-- an unsanctioned agent starts running again (`AGENT_UNSANCTIONED_START`)
-
-Agent Watch only alerts. It never stops or blocks a process. To recognise an agent it doesn't know yet, copy the built-in catalog to `~/.devshield/agent_catalog.json` and add an entry; that file then replaces the built-in one. Command lines are redacted (API keys and tokens masked) before they are logged.
+To recognise an agent the catalog doesn't know yet: on Linux, root can put a catalog in `/etc/devshield/agent_catalog.json`, which replaces the built-in one. On Windows there is deliberately no per-user override, because an agent running as you could edit it.
 
 ---
 
@@ -135,10 +138,14 @@ sudo devshield revoke <ID>       # withdraw approval — needs root
 sudo devshield verify-log        # check the audit log's hash chain
 ```
 
-- **Why approving needs `sudo`:** an AI agent runs as *you*. If your user could change the rules, so could the agent. Any non-root attempt to sanction or revoke is refused and logged as `AGENT_TAMPER_ATTEMPT`, naming the program that tried.
+- **Why approving needs `sudo`:** an AI agent runs as *you*. If your user could change the rules, so could the agent. Any non-root attempt to change policy is refused and logged as `AGENT_TAMPER_ATTEMPT`, naming the program that tried. Logging is limited to 10 per minute per user; further attempts are refused and counted in one summary event, so the log can't be flooded.
 - **Who can read:** root, plus the owner set in `/etc/devshield/daemon.env` (`DEVSHIELD_OWNER=alice`). Other local users are refused.
 - **The audit log is hash-chained.** Editing, deleting, reordering or truncating records is detected and reported with the exact line. Tampering found at start-up is logged as `AUDIT_TAMPER_DETECTED`. A daemon that was killed, rather than stopped cleanly, shows up as `DAEMON_UNCLEAN_STOP` on its next start.
-- **Exit codes for scripts and monitoring:** `status` and `agents` exit with **3** when a rogue or risky agent is running or the log is tampered with.
+- **Exit codes for scripts and monitoring:** **3** means "something needs your attention", 1 means the command failed, 0 means all clear.
+  - `status` exits 3 when a rogue or risky agent is running or the audit log is tampered with.
+  - `agents` exits 3 when a rogue or risky agent is running (`agents --json` always exits 0).
+  - `verify-log` exits 3 only for a broken hash chain; a missing or unreadable log is 1.
+  - `net` exits 3 while telemetry is flowing; `egress` when the kernel's rules don't match; `lan-privacy` when LLMNR/mDNS is on or a hardware Wi-Fi address is in use; `profile` when a setting didn't read back; `sinkhole` when entries are missing or the resolver ignores `/etc/hosts`.
 
 **Sensors and thermal profiles (Linux):**
 
@@ -178,7 +185,7 @@ devshield net --all    # also local network and this machine
 ```
 
 - It reuses the data Agent Watch already collects every 10 seconds, so it adds no scanning of its own.
-- Telemetry is recognised by the sinkhole's list of telemetry domains, resolved to addresses every 30 minutes while the sinkhole is off (when it's on, those names can't be reached by name anyway). Each program that sends to one is logged once a day as `NET_TELEMETRY`.
+- Telemetry is recognised by the sinkhole's list of telemetry domains, resolved to addresses every 30 minutes while the sinkhole is off (when it's on, those names can't be reached by name anyway). Connections are checked every 30 seconds, against Agent Watch's latest scan, so a connection shorter than that can be missed. Each program+domain pair is logged as `NET_TELEMETRY` at most once per 24 hours while the daemon runs; a daemon restart resets that.
 - Only connections this machine *started* are shown. Connections other machines open *to* it (for example SSH) are left out.
 - Labels come from IP addresses. Big providers share addresses, so a label means "likely", not proof. TCP only for now.
 
@@ -199,7 +206,7 @@ sudo devshield lan-privacy off     # undo: removes only DevShield's own files
 
 **Network controls (Linux): block one agent, or lock the whole machine down**
 
-DevShield writes its rules into its own nftables table (`inet devshield`) and never touches other tables. The rules live in the kernel, so they **keep working if DevShield stops** (fail closed). Every 10 seconds the daemon compares the kernel's rules with what they should be. If another tool removed or changed them (for example a firewall service running `flush ruleset`, or a single rule deleted), it puts them back and logs `EGRESS_RULES_RESTORED`. At boot, `devshield-egress.service` loads the saved rules **before the network starts**, so a lockdown has no unprotected window. Needs the `nft` tool (package `nftables`).
+DevShield writes its rules into its own nftables table (`inet devshield`) and never touches other tables. The rules live in the kernel, so they **keep working if DevShield stops** (fail closed). Every 10 seconds the daemon compares the kernel's rules with what they should be. If another tool removed or changed them (for example a firewall service running `flush ruleset`, or a single rule deleted), it puts them back and logs `EGRESS_RULES_RESTORED`. At boot, `devshield-egress.service` is ordered to load the saved rules **before the network starts**, so a lockdown has no unprotected window (this ordering has not yet been checked on a real systemd boot). If the saved state can't be read, DevShield leaves the kernel's rules exactly as they are and refuses changes until you run `sudo devshield restore-all`. Needs the `nft` tool (package `nftables`).
 
 *Block one agent* (the "Block" step of Block → Allow → Charge):
 
@@ -214,7 +221,8 @@ sudo devshield unblock 17d4a1d7  # give it its network access back
 - **Connections it already had are cut too.** Those sockets were opened before the block, so DevShield drops them by their exact addresses.
 - **It stays blocked.** If the agent restarts, it is caught again at the next scan (up to about 10 seconds; logged as `AGENT_REQUARANTINED`). The block survives reboots. You can also block an agent DevShield has seen before that isn't running now: it is cut off as soon as it starts.
 - Rules for the agent's old connections are removed once those sockets close, so a port it once used is never blocked for another program.
-- Uses a cgroup v2 group (`devshield-quarantine`). Works on unified and on "hybrid" cgroup layouts. If cgroup v2 isn't mounted at all, `devshield egress` says so.
+- Uses a cgroup v2 group (`devshield-quarantine`). Tested on unified and "hybrid" cgroup layouts in namespaces, not yet on a real distribution under systemd. If cgroup v2 isn't mounted at all, `devshield egress` says so.
+- When unblocked, processes go back to the cgroup they came from. If that fails, they are placed in the root cgroup (outside their session's limits) and DevShield logs `EGRESS_RELEASE_FALLBACK`.
 
 *Allow one agent out during a lockdown* (the "Allow" step):
 
@@ -241,7 +249,7 @@ sudo devshield lockdown on --via wg0 --endpoint 203.0.113.5:51820/udp
 sudo devshield lockdown on --tor
 # Through any tunnel/proxy client that runs as its own user (obfuscated VPNs, Tor bridges, …):
 sudo devshield lockdown on --user sing-box
-# Keep printers/NAS reachable (DNS still must go through the tunnel):
+# Keep printers/NAS reachable by IP (name lookups still must go through the tunnel):
 sudo devshield lockdown on --via wg0 --endpoint 203.0.113.5:51820/udp --lan
 # Trying a new tunnel? Auto-revert unless you confirm:
 sudo devshield lockdown on --via wg0 --endpoint 203.0.113.5:51820/udp --confirm-within 2m
@@ -249,10 +257,17 @@ sudo devshield lockdown confirm
 sudo devshield lockdown off
 ```
 
-- **No leaks around the tunnel.** DNS, IPv6, and programs that ignore proxy settings can't go around it, because nothing else is allowed out. If the tunnel drops, traffic stops instead of falling back to your normal connection.
+- **Nothing else leaves.** That covers DNS, IPv6, programs that ignore proxy settings, **and traffic the machine forwards for containers and VMs** (Docker, libvirt). If the tunnel drops, traffic stops instead of falling back to your normal connection. A few exceptions keep the network link itself working:
+  - DHCP to the local network only (DHCP to a public address is dropped)
+  - IPv6 neighbour discovery to link-local and multicast addresses only
+  - loopback
+
+  This is live-tested against the kernel in namespaces: a forwarded packet, and a send to UDP port 67 at a public address, were dropped. DNS and IPv6 blocking follow from the final drop rule; they are not separately live-probed.
 - **Telemetry needs your permission.** With the sinkhole on and lockdown on, telemetry from any vendor (operating system, drivers, editors) can only leave through the path you chose, and only if its domain isn't blocked. Every drop is counted, and samples are logged (`devshield-lockdown-drop` in the kernel log).
 - **With `--tor`, name lookups need Tor too.** Point programs at Tor's SOCKS port with remote DNS, or set Tor's `DNSPort` as the resolver; ordinary DNS is blocked, which is what prevents the leak.
-- **SSH into this machine keeps working.** Replies to connections someone makes *to* this machine are allowed. `--strict` blocks those too, but it also cuts SSH.
+- **SSH into this machine keeps working.** Replies to connections someone makes *to* this machine are allowed. This is also a way out: a program that runs a server which someone outside connects to can send data back through it. `--strict` blocks those replies too, but it also cuts SSH.
+- **With `--lan`**, name lookups and announcements on the local network are dropped too: DNS, mDNS, LLMNR and NetBIOS. Printers that are found by name won't be discovered; use their IP address.
+- **`--confirm-within`** must be at least 10 seconds. An unconfirmed lockdown is never saved to disk, so a restart or reboot also reverts it.
 - Endpoints must be IP addresses: looking up a name would itself need traffic outside the tunnel.
 - When Tor is blocked: any tunnel works with `--via`/`--user`. That includes WireGuard or OpenVPN to a server you control, obfuscated protocols, and Tor with bridges, which still runs as the Tor user. DevShield doesn't get around censorship itself. It makes sure **only** the path you picked is used.
 
@@ -263,6 +278,7 @@ sudo devshield lockdown off
 - **Programs that set up their own route** through a tunnel you allowed. Lockdown controls *how* traffic leaves, not which program sends it.
 - **Blocking works per process.** An agent that runs *inside* another program, such as an editor extension, shares that program's process. Blocking it also cuts the host program (for example the editor's extension host) off the network.
 - **A gap of up to about 10 seconds** when a blocked agent restarts, until the next scan catches it.
+- **Work done through a helper that is already running.** A blocked agent that asks a privileged service to act for it (for example `docker run …` through the Docker daemon, `systemd-run --user`, `at`, or a new tmux window) has that work done by a process outside the quarantine group. Lockdown still covers what such helpers send, including forwarded container traffic; a per-agent block does not.
 - **Old-style cgroup v1 network controllers** (net_cls/net_prio) in use on a hybrid system disable the per-agent match. This is rare on modern distributions.
 - **Allowing arbitrary programs (a browser, a game)** and **ask-before-connect prompts** (like simplewall or OpenSnitch) are not built yet; today you allow agents, tunnels and users. See the roadmap.
 
@@ -285,7 +301,19 @@ sudo systemctl daemon-reload && sudo systemctl enable --now devshield
 sudo systemctl enable devshield-egress   # network rules at boot, before the network starts
 ```
 
-Status: tested by unit tests and a live run with real users on Linux (owner/other user, a rogue attempting self-sanction, `kill -9`, log tampering). **Not yet tested under systemd itself**, so the unit's hardening settings still need a real-machine check. The sinkhole was tested live on a real Linux system: the resolver returned 0.0.0.0 for blocked domains, update servers kept resolving, and `/etc/hosts` came back byte-for-byte identical after `off`. Sensors and thermal profiles are tested on simulated kernel layouts (Intel/AMD, laptop and desktop) and through the real daemon socket, but **not yet on real hardware**. The network monitor was tested live in a namespace: a real connection to an address standing in for a telemetry domain was labelled and logged once, and the server side of the same connection was correctly left out. LAN privacy was tested through the real daemon on a simulated system tree. It was **not yet** tested with real systemd-resolved, NetworkManager or Wi-Fi hardware. Network controls are tested live by `test/linux-live/run.sh` (see its README), through the real daemon, kernel and nft, in an isolated network namespace with both unified and hybrid cgroup layouts. The tests covered: blocking a running agent and its child (held and new connections stopped, other programs unaffected), re-blocking after a restart, unblocking, lockdown via a tunnel interface, an endpoint or an allowed user, the auto-revert, restoring a deleted table, keeping lockdown across a daemon restart, blocking an agent before it starts, removing rules for closed sockets, detecting one deleted rule inside the table, and `egress-restore` with no daemon running; allowing a sanctioned agent out of an allowed-only lockdown (other programs stayed blocked), automatic withdrawal on revoke, re-allow after restart, and block overriding allow. They were **not yet** run with a real WireGuard/Tor setup, or under systemd. The Linux tray comes next.
+**How the Linux side is tested.** Unit tests (with the race detector) cover every package, and `test/linux-live/run.sh` re-runs the live checks in throwaway namespaces, on fresh and on the host's cgroup layout. The live checks drive the real kernel, nftables, daemon, socket and resolver. They cover:
+- real users: the owner can read, other users can't, and non-root changes are refused and logged
+- the sinkhole on the real resolver (0.0.0.0 while on, `/etc/hosts` byte-identical after off, on a private copy of the file)
+- block, allow and lockdown, including forwarded container/VM traffic and the DHCP port
+- tamper restoration, the dead-man switch and persistence
+- `restore-all` and the network monitor
+
+**Not yet tested:**
+- under systemd on a real distribution, including the units' hardening and boot ordering
+- on real hardware (sensors, thermal profiles, Wi-Fi MAC randomisation)
+- with real systemd-resolved, NetworkManager, WireGuard or Tor
+
+The Linux tray comes next.
 
 ## 3. Pro Use
 
@@ -327,7 +355,7 @@ pwsh -File scripts\hardening\rollback.ps1 -DryRun -All
 
 ### Editing the bundled blocklist
 
-The offline-fallback telemetry blocklist lives at `scripts/monitor/blocklist_bundled.json`. To add a domain, append it to the `domains` array, and re-run the privacy enforcer.
+`scripts/monitor/blocklist_bundled.json` is currently **not read by any script**: the network guardian uses its own built-in list, and the privacy enforcer has its own list inside `privacy_enforcer.ps1`. To add a domain today, edit `$TELEMETRY_DOMAINS` in `scripts/hardening/privacy_enforcer.ps1`. On Linux, root can put a list in `/etc/devshield/hosts_blocklist.json`.
 
 ### Adding custom guardian allowlist entries
 

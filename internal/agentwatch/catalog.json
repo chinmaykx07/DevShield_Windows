@@ -28,7 +28,7 @@
       "process_names": ["gemini.exe"],
       "cmdline_patterns": ["@google[\\\\/]gemini-cli"] },
     { "name": "GitHub Copilot CLI", "vendor": "GitHub", "kind": "cli",
-      "cmdline_patterns": ["@github[\\\\/]copilot"] },
+      "cmdline_patterns": ["@github[\\\\/]copilot[\\\\/]"] },
     { "name": "Amp CLI", "vendor": "Amp", "kind": "cli",
       "process_names": ["amp.exe"],
       "cmdline_patterns": ["@sourcegraph[\\\\/]amp"] },
@@ -36,32 +36,32 @@
       "cmdline_patterns": ["@qwen-code[\\\\/]qwen-code"] },
     { "name": "OpenCode", "vendor": "Anomaly", "kind": "cli",
       "process_names": ["opencode.exe"],
-      "cmdline_patterns": ["opencode-ai[\\\\/]", "[\\\\/]opencode(\\.exe)?(\\s|\"|$)"] },
+      "cmdline_patterns": ["opencode-ai[\\\\/]", "(^|[\\\\/\\s])opencode(\\.exe)?(\\s|\"|$)"] },
     { "name": "Goose", "vendor": "Agentic AI Foundation", "kind": "cli",
       "process_names": ["goose.exe", "goosed.exe"] },
     { "name": "Cline CLI", "vendor": "Cline", "kind": "cli",
       "process_names": ["cline.exe"] },
     { "name": "Kiro", "vendor": "Amazon", "kind": "ide",
-      "process_names": ["kiro.exe", "kiro-cli.exe"] },
+      "process_names": ["kiro.exe", "kiro-cli.exe", "kiro", "kiro-cli"] },
     { "name": "Aider", "vendor": "Aider", "kind": "cli",
       "process_names": ["aider.exe"],
-      "cmdline_patterns": ["-m\\s+aider(\\s|$)", "[\\\\/]aider(\\.exe)?(\\s|\"|$)"] },
+      "cmdline_patterns": ["(^|[\\\\/\\s])aider(\\.exe)?(\\s|\"|$)"] },
     { "name": "Open Interpreter", "vendor": "Open Interpreter", "kind": "cli",
       "process_names": ["interpreter.exe"] },
     { "name": "OpenClaw", "vendor": "OpenClaw Foundation", "kind": "cli",
       "process_names": ["openclaw.exe"],
-      "cmdline_patterns": ["openclaw"] },
+      "cmdline_patterns": ["(^|[\\\\/\\s])openclaw(\\.exe|\\.js|\\.mjs)?(\\s|\"|$)"] },
 
     { "name": "Cursor", "vendor": "Anysphere", "kind": "ide",
-      "process_names": ["cursor.exe"] },
+      "process_names": ["cursor.exe", "cursor"] },
     { "name": "Windsurf", "vendor": "Cognition", "kind": "ide",
-      "process_names": ["windsurf.exe"] },
+      "process_names": ["windsurf.exe", "windsurf"] },
     { "name": "Antigravity", "vendor": "Google", "kind": "ide",
-      "process_names": ["antigravity.exe"] },
+      "process_names": ["antigravity.exe", "antigravity"] },
     { "name": "Trae IDE", "vendor": "ByteDance", "kind": "ide",
-      "process_names": ["trae.exe"] },
+      "process_names": ["trae.exe", "trae"] },
     { "name": "Warp", "vendor": "Warp", "kind": "desktop",
-      "process_names": ["warp.exe"] },
+      "process_names": ["warp.exe", "warp-terminal"] },
     { "name": "ChatGPT Desktop", "vendor": "OpenAI", "kind": "desktop",
       "process_names": ["chatgpt.exe"] },
     { "name": "Perplexity Desktop", "vendor": "Perplexity", "kind": "desktop",
@@ -73,10 +73,10 @@
       "process_names": ["ollama.exe", "ollama app.exe", "ollama"],
       "ports": [11434] },
     { "name": "LM Studio", "vendor": "Element Labs", "kind": "runtime",
-      "process_names": ["lm studio.exe", "lms.exe"],
+      "process_names": ["lm studio.exe", "lms.exe", "lm-studio", "lms"],
       "ports": [1234] },
     { "name": "Jan", "vendor": "Menlo Research", "kind": "runtime",
-      "process_names": ["jan.exe"],
+      "process_names": ["jan.exe", "jan"],
       "ports": [1337] },
     { "name": "llama.cpp server", "vendor": "ggml", "kind": "runtime",
       "process_names": ["llama-server.exe", "llama-server"],
@@ -85,7 +85,7 @@
       "process_names": ["foundry.exe"] },
 
     { "name": "MCP server", "vendor": "", "kind": "mcp_server",
-      "cmdline_patterns": ["@modelcontextprotocol[\\\\/]", "[\\w.-]*mcp-server[\\w.-]*", "\\bmcp\\b.*--stdio", "(uvx|npx)(\\.cmd|\\.exe)?\"?\\s+[^\\s]*mcp"] }
+      "cmdline_patterns": ["@modelcontextprotocol[\\\\/]", "[\\w.-]*mcp-server[\\w.-]*", "(uvx|npx)(\\.cmd|\\.exe)?\"?\\s+[^\\s]*mcp"] }
   ],
 
   "llm_api_hosts": [
@@ -164,7 +164,7 @@
 
   "unusual_paths": [
     "[\\\\/]appdata[\\\\/]local[\\\\/]temp[\\\\/]", "[\\\\/]windows[\\\\/]temp[\\\\/]", "[\\\\/]downloads[\\\\/]",
-    "[\\\\/]users[\\\\/]public[\\\\/]", "\\$recycle\\.bin", "^/tmp/", "^/dev/shm/"
+    "[\\\\/]users[\\\\/]public[\\\\/]", "\\$recycle\\.bin", "^/tmp/", "^/var/tmp/", "^/dev/shm/"
   ],
 
   "ignore_processes": [

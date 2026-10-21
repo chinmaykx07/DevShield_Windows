@@ -21,7 +21,6 @@ package daemon
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -116,12 +115,15 @@ func Run(ctx context.Context, cfg Config) error {
 	if err != nil {
 		return err
 	}
-	defer d.close()
 
 	l, err := ipc.Listen(cfg.Socket)
 	if err != nil {
-		return fmt.Errorf("listen on %s: %w", cfg.Socket, err)
+		err = fmt.Errorf("listen on %s: %w", cfg.Socket, err)
+		d.event("DAEMON_START_FAILED", err.Error(), "fail")
+		d.shutdown()
+		return err
 	}
+	defer d.close()
 	go func() {
 		if err := ipc.Serve(l, d.handle); err != nil {
 			log.Printf("daemon: ipc: %v", err)
@@ -155,18 +157,20 @@ func start(cfg Config) (*Daemon, error) {
 	}
 
 	// ── Audit log: verify, and record tampering instead of going blind ──
-	al, err := auditlog.Open(d.logPath)
-	var chainErr *auditlog.ChainError
-	if err != nil && !errors.As(err, &chainErr) {
+	al, info, err := auditlog.Open(d.logPath)
+	if err != nil {
 		return nil, fmt.Errorf("open audit log: %w", err)
 	}
 	d.log = al
-	if chainErr != nil {
+	if info.Broken != nil {
 		d.tamper = true
-		d.event("AUDIT_TAMPER_DETECTED", chainErr.Error(), "fail")
+		d.event("AUDIT_TAMPER_DETECTED", fmt.Sprintf("%s — the broken log was kept as %s and a new log started", info.Broken.Error(), info.Aside), "fail")
 	}
-	if last, _ := auditlog.Tail(d.logPath, 1); len(last) == 1 && last[0].Action != "DAEMON_STOPPED" {
-		d.event("DAEMON_UNCLEAN_STOP", "previous run ended without a clean stop (killed, crashed or power loss) after "+last[0].Action, "warn")
+	if info.TornBytes > 0 {
+		d.event("AUDIT_TORN_RECORD_REMOVED", fmt.Sprintf("an unfinished final record (%d bytes, never confirmed) was removed — a crash or power loss cut a write short", info.TornBytes), "warn")
+	}
+	if info.Last != nil && info.Last.Action != "DAEMON_STOPPED" {
+		d.event("DAEMON_UNCLEAN_STOP", "previous run ended without a clean stop (killed, crashed or power loss) after "+info.Last.Action, "warn")
 	}
 	if os.Geteuid() != 0 {
 		d.event("DAEMON_NOT_ROOT", "running without root: other users' processes are partly hidden and the state directory is only as safe as this account", "warn")
@@ -204,9 +208,14 @@ func start(cfg Config) (*Daemon, error) {
 }
 
 func (d *Daemon) close() {
+	d.event("DAEMON_STOPPED", "clean shutdown", "ok")
+	d.shutdown()
+}
+
+// shutdown stops everything without claiming a clean stop.
+func (d *Daemon) shutdown() {
 	close(d.stop)
 	d.watcher.Stop()
-	d.event("DAEMON_STOPPED", "clean shutdown", "ok")
 	d.log.Close()
 	d.db.Close()
 }
@@ -270,8 +279,11 @@ func (d *Daemon) handle(peer ipc.Peer, req ipc.Request) ipc.Response {
 		return ipc.Response{OK: true, Agents: d.agents()}
 	case "events":
 		n := req.Limit
-		if n <= 0 || n > 500 {
+		switch {
+		case n <= 0:
 			n = 20
+		case n > 500:
+			n = 500 // the most one answer carries; asking for more is not an error
 		}
 		recs, err := auditlog.Tail(d.logPath, n)
 		if err != nil {

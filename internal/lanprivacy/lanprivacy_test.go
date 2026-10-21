@@ -120,3 +120,20 @@ func TestProtocolsPerLinkOverride(t *testing.T) {
 		t.Fatalf("got llmnr=%s mdns=%s", l, m)
 	}
 }
+
+// A failure part-way must leave nothing behind (found in review: the
+// resolved drop-in stayed while "Applied" claimed success).
+func TestApplyIsAllOrNothing(t *testing.T) {
+	protos := "+LLMNR"
+	s, _ := fakeSystem(t, &protos)
+	os.MkdirAll(filepath.Join(s.Root, NMDropIn), 0o755) // a directory where the file must go: the write fails
+	if _, err := s.Apply(); err == nil {
+		t.Fatal("expected failure")
+	}
+	if _, err := os.Stat(filepath.Join(s.Root, ResolvedDropIn)); err == nil {
+		t.Fatal("resolved drop-in left behind after a failed apply")
+	}
+	if st := s.Check(); st.Applied {
+		t.Fatal("status claims applied")
+	}
+}

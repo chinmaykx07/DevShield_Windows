@@ -146,38 +146,21 @@ type Result struct {
 // and asks them to reload.
 func (s System) Apply() (Result, error) {
 	var r Result
-	write := func(p, content string) error {
-		if err := os.MkdirAll(filepath.Dir(s.path(p)), 0o755); err != nil {
-			return err
-		}
-		return os.WriteFile(s.path(p), []byte(content), 0o644)
-	}
-
+	// Every file is written first, all or nothing: a failure part-way
+	// puts back exactly what was there, so the machine is never left
+	// half-configured (found in review).
+	type file struct{ path, content string }
+	var files []file
 	if s.hasResolved() {
-		if err := write(ResolvedDropIn, resolvedConf); err != nil {
-			return r, fmt.Errorf("%s: %w", ResolvedDropIn, err)
-		}
-		r.Changed = append(r.Changed, "systemd-resolved configured: LLMNR and mDNS off")
-		if out, err := s.Run("systemctl", "try-reload-or-restart", "systemd-resolved"); err != nil {
-			r.Notes = append(r.Notes, "systemd-resolved did not reload ("+why(out, err)+"); takes effect after reboot")
-		}
+		files = append(files, file{ResolvedDropIn, resolvedConf})
 	} else {
 		r.Skipped = append(r.Skipped, "systemd-resolved not installed (LLMNR/mDNS then depend on your resolver; see warnings)")
 	}
-
 	if s.hasNM() {
-		if err := write(NMDropIn, nmConf); err != nil {
-			return r, fmt.Errorf("%s: %w", NMDropIn, err)
-		}
-		r.Changed = append(r.Changed, "NetworkManager configured: random MAC per Wi-Fi network and while scanning; LLMNR/mDNS off per connection")
-		if out, err := s.Run("nmcli", "general", "reload", "conf"); err != nil {
-			r.Notes = append(r.Notes, "NetworkManager did not reload ("+why(out, err)+"); takes effect after reboot")
-		}
-		r.Notes = append(r.Notes, "the new Wi-Fi MAC is used from the next connection (reconnect Wi-Fi to apply now)")
+		files = append(files, file{NMDropIn, nmConf})
 	} else {
 		r.Skipped = append(r.Skipped, "NetworkManager not installed (MAC randomisation must be set in your network tool)")
 	}
-
 	// Record the live values before the first change; a repeated "on"
 	// keeps the first record (the live values are DevShield's by then).
 	originals := s.savedOriginals()
@@ -189,8 +172,50 @@ func (s System) Apply() (Result, error) {
 			}
 		}
 	}
-	if err := write(SysctlDropIn, sysctlConf(originals)); err != nil {
-		return r, fmt.Errorf("%s: %w", SysctlDropIn, err)
+	files = append(files, file{SysctlDropIn, sysctlConf(originals)})
+
+	type before struct {
+		path    string
+		content []byte
+		existed bool
+	}
+	var done []before
+	undo := func() {
+		for _, b := range done {
+			if b.existed {
+				os.WriteFile(s.path(b.path), b.content, 0o644)
+			} else {
+				os.Remove(s.path(b.path))
+			}
+		}
+	}
+	for _, f := range files {
+		old, err := os.ReadFile(s.path(f.path))
+		b := before{path: f.path, content: old, existed: err == nil}
+		if err := os.MkdirAll(filepath.Dir(s.path(f.path)), 0o755); err != nil {
+			undo()
+			return Result{}, fmt.Errorf("%s: %w (nothing was changed)", f.path, err)
+		}
+		if err := os.WriteFile(s.path(f.path), []byte(f.content), 0o644); err != nil {
+			undo()
+			return Result{}, fmt.Errorf("%s: %w (nothing was changed)", f.path, err)
+		}
+		done = append(done, b)
+	}
+
+	// Then ask each component to use them.
+	if s.hasResolved() {
+		r.Changed = append(r.Changed, "systemd-resolved configured: LLMNR and mDNS off")
+		if out, err := s.Run("systemctl", "try-reload-or-restart", "systemd-resolved"); err != nil {
+			r.Notes = append(r.Notes, "systemd-resolved did not reload ("+why(out, err)+"); takes effect after reboot")
+		}
+	}
+	if s.hasNM() {
+		r.Changed = append(r.Changed, "NetworkManager configured: random MAC per Wi-Fi network and while scanning; LLMNR/mDNS off per connection")
+		if out, err := s.Run("nmcli", "general", "reload", "conf"); err != nil {
+			r.Notes = append(r.Notes, "NetworkManager did not reload ("+why(out, err)+"); takes effect after reboot")
+		}
+		r.Notes = append(r.Notes, "the new Wi-Fi MAC is used from the next connection (reconnect Wi-Fi to apply now)")
 	}
 	applied := 0
 	for k, v := range sysctls {
@@ -261,8 +286,9 @@ type Iface struct {
 
 // Status is the effective LAN-privacy state.
 type Status struct {
-	Applied     bool     `json:"applied"` // DevShield's drop-ins are present
-	LLMNR       string   `json:"llmnr"`   // on | off | unknown
+	Applied     bool     `json:"applied"`           // all of DevShield's drop-ins are present
+	Partial     bool     `json:"partial,omitempty"` // only some are: run "lan-privacy on" again
+	LLMNR       string   `json:"llmnr"`             // on | off | unknown
 	MDNS        string   `json:"mdns"`
 	IPv6Privacy string   `json:"ipv6_privacy"` // preferred | on | off | n/a
 	WiFi        []Iface  `json:"wifi,omitempty"`
@@ -272,7 +298,22 @@ type Status struct {
 // Check reads the effective state.
 func (s System) Check() Status {
 	st := Status{LLMNR: "unknown", MDNS: "unknown", IPv6Privacy: "n/a"}
-	st.Applied = s.exists(ResolvedDropIn) || s.exists(NMDropIn) || s.exists(SysctlDropIn)
+	want, have := 1, 0 // the sysctl drop-in always applies
+	if s.exists(SysctlDropIn) {
+		have++
+	}
+	for _, c := range []struct {
+		installed bool
+		file      string
+	}{{s.hasResolved(), ResolvedDropIn}, {s.hasNM(), NMDropIn}} {
+		if c.installed {
+			want++
+		}
+		if s.exists(c.file) {
+			have++
+		}
+	}
+	st.Applied, st.Partial = have >= want, have > 0 && have < want
 
 	if out, err := s.Run("resolvectl", "status"); err == nil {
 		st.LLMNR, st.MDNS = protocols(out)

@@ -30,14 +30,14 @@ Date: 2026-10-20. Based on web research (sources at the end) plus checks run on 
 **What's genuinely distinctive:**
 1. **Behaviour-first rogue-agent detection for individuals**: works on undocumented/renamed agents, no licence, no fleet, decisions owned by the machine owner.
 2. **Owner-sovereignty model** (Block → Allow with signed permission → Charge). Nobody packages this for a single developer.
-3. **Linux + Windows from one Go core, light footprint** (measured 0.37% of one core, ~1.8 MB heap).
+3. **Linux + Windows from one Go core, light footprint** (measured once at 0.37% of one core and ~1.8 MB heap on a 78-process Linux container; not yet measured on Windows or a busy desktop).
 
 **What's weak today (must be fixed before claiming "best"):**
 - The Windows PowerShell features mostly don't work as wired (see `REVIEW_NOTES_2026-10-20.md`).
 - Nothing has run on real Windows yet.
 - Detection polls every 0.5 s and can miss very short commands. Kernel-level tools (eBPF/ETW) don't have this gap.
-- **Tamper exposure (important).** The sanction list, catalog override and audit log live in `~/.devshield`, writable by the same user any agent runs as. **A rogue agent could sanction itself, edit the catalog, delete its own alerts, or simply kill DevShield.** A security tool must not let the thing it watches change its rules.
-- **Build hygiene.** The scanner `govulncheck` reports **35 reachable Go standard-library vulnerabilities**, because the code is built with Go 1.24.7 here and the release pipeline pins **Go 1.22 (out of support)**. Shipping today would ship known CVEs. The race detector is clean.
+- **Tamper exposure on Windows (important).** On Linux this is fixed: the sanction list, agent database and a hash-chained audit log are owned by a root daemon, and policy changes need root. On Windows the sanction list and audit log still live in `~/.devshield`, writable by the same user any agent runs as, so **a rogue agent could sanction itself, delete its own alerts, or kill DevShield.**
+- **Build hygiene: fixed.** The project now builds with the patched Go toolchain named in `go.mod`, and `govulncheck` reports no reachable vulnerabilities (it runs in CI).
 
 ## 3. The frontier (where the best products are heading)
 1. **Ground truth from the kernel, not self-reports**: eBPF on Linux (Falco Prempti, Tetragon, AgentSight), ETW on Windows, Endpoint Security framework on macOS. Agents' own telemetry/hooks are useful but can be wrong or disabled.

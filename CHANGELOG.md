@@ -7,8 +7,9 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 - Agent Watch: behaviour-first detection of AI agents and rogue agents.
-  Any process is classed as an agent by behaviour (LLM traffic, LLM keys
-  set for it, AI libraries loaded, shell/tool agent loop), never by name.
+  A process is classed as an agent by behaviour (LLM traffic, LLM keys
+  set for it, AI libraries loaded, shell/tool agent loop), or by matching
+  a catalog entry by identity (its program or the script it runs).
   Rogue indicators (undocumented, Temp/Downloads location,
   approvals-disabled flags, recon/persistence tools, auto-start, detached)
   give 🚨 rogue-suspect and ⚠ risky verdicts. Sanction approved agents from
@@ -87,6 +88,49 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   35 to 0. CI now runs vet, race tests and govulncheck on Linux and Windows.
 
 ### Fixed
+- 2026-10-21 independent audit (four reviewers; every finding was
+  reproduced or traced before fixing; regression tests added):
+  - Lockdown ignored traffic forwarded for containers/VMs (added a forward
+    chain). Its DHCP rule let any program send UDP to port 67/547 anywhere
+    (now local link only). Logging wasn't rate-limited (statement order).
+    `--lan` let mDNS/LLMNR/NetBIOS out.
+  - An unconfirmed `--confirm-within` lockdown could be saved to disk by
+    other saves and come back after a restart; a stale timer could revert
+    a newer lockdown. Off/reset/apply failures left memory out of step
+    with the kernel. An empty policy never checked for a leftover table,
+    and tamper checks compared only "first word + verdict" of each rule
+    (now the whole rule, against real nft output in testdata).
+  - Disallow left untraceable helpers in the allowed group. A corrupt
+    state file silently disabled the network controls (now fails closed).
+    Rules for a blocked agent's sockets were kept by address, not owner.
+  - Agent Watch false positives: anything listening on 8080/1234/1337 was
+    a "rogue AI agent"; PyTorch workers, nodemon in an "agentic" folder,
+    `rg openclaw`, `tail mcp-server.log`, `npm install
+    @modelcontextprotocol/sdk`, VS Code opening a folder named opencode and
+    Neovim's Copilot server were all flagged; a human typing in an IDE
+    terminal counted as the IDE's agent loop. Matching now uses the
+    program's identity, not its arguments.
+  - Agent Watch identity gaps: `--require=evil.js`, relative scripts,
+    `-X utf8`, Linux `uvx`/`java` all collided with approved agents'
+    fingerprints. Scripts in /tmp weren't flagged. Sanctioned Ollama
+    services stayed "risky" forever. One `node app.js` service marked every
+    node agent auto-started. Root's daemon scanned only root's autostart
+    entries. A forked-then-exec'd tool was hidden behind its parent's name.
+    More secret formats are redacted.
+  - The audit log reported tampering while appends were in progress, and a
+    crash-torn last line broke it forever. A broken log is now kept as
+    evidence and a fresh one started.
+  - The sinkhole could delete user lines (missing end marker, user lines
+    inside the block) and leave /etc/hosts empty after a failed write.
+  - `verify-log` reported "tampered" for a permission error and "intact"
+    for a missing file. `devshield net` could hang on DNS during a
+    lockdown. LAN-privacy "on" could be left half-applied. Thermal
+    rollback errors were ignored. A data race on Agent Watch's shared
+    process cache. Unlimited concurrent IPC connections.
+  - The tray contacted GitHub automatically (now manual), and running
+    `devshield` without arguments on Linux started stubbed Windows code.
+  - Docs claimed several things that weren't true (see the README's
+    status table, the manual and `docs/REVIEW_NOTES_2026-10-20.md` §7).
 - `lan-privacy off` left the live IPv6 privacy setting changed until
   reboot. The original value is now recorded (in DevShield's own drop-in,
   kept across repeated `on`) and written back.
@@ -110,8 +154,8 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 - Phase B local build verification (see `docs/SHIP_PLAN.md`)
 - Phase C VM-based safety testing — full bricking-risk matrix
 - Phase D real hardware compatibility testing
-- `docs/INSTALL.md`, `docs/USER_MANUAL.md`, `docs/TROUBLESHOOTING.md` — not yet written
-- `go.sum` — must be generated via `go mod tidy` (requires network access to the Go module proxy, not available in this packaging environment)
+- Windows: fix C1–C6 and C8 (`docs/REVIEW_NOTES_2026-10-20.md`) and run on a real Windows machine
+- Linux: run under systemd on a real distribution, with real hardware, a real VPN/Tor setup, systemd-resolved and NetworkManager
 - WinGet manifest PR submission to `microsoft/winget-pkgs`
 - GitHub repository path updated to `chinmaykx07/DevShield_Windows` in the app metadata and packaging files
 

@@ -20,7 +20,9 @@ import (
 
 // ── VERSION ──────────────────────────────────────────────────
 
-const dsVersion = "0.1.0"
+// dsVersion is a variable so the build can stamp it (-ldflags "-X main.dsVersion=…");
+// the linker silently ignores -X on a constant.
+var dsVersion = "0.1.0"
 
 // ── MAIN ─────────────────────────────────────────────────────
 

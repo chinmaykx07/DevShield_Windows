@@ -15,6 +15,7 @@
 package netwatch
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"sort"
@@ -81,28 +82,42 @@ func Classify(conns []Conn, llmHost func(ip string) string, telemetry map[string
 
 var rank = map[string]int{"telemetry": 0, "llm": 1, "other": 2, "lan": 3, "loopback": 4}
 
-// Resolver keeps telemetry domains resolved to IPs, refreshing at most
-// every interval. Lookup is injectable for tests.
+// Resolver keeps telemetry domains resolved to IPs. Lookups never run on
+// the caller's path: IPs answers from the cache at once and, when the
+// cache is stale, starts one background refresh (DNS can be slow or, under
+// a lockdown, unreachable). Lookup is injectable for tests.
 type Resolver struct {
 	Interval time.Duration
 	Lookup   func(host string) ([]string, error)
 
-	mu  sync.Mutex
-	at  time.Time
-	ips map[string]string
+	mu         sync.Mutex
+	at         time.Time
+	ips        map[string]string
+	refreshing bool
 }
 
-// IPs returns ip → domain for domains, refreshing if stale. On failure
-// (offline) the last good set is kept.
+// IPs returns the cached ip → domain map (empty until the first refresh
+// finishes) and refreshes it in the background when it is stale.
 func (r *Resolver) IPs(domains []string) map[string]string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.ips != nil && time.Since(r.at) < r.Interval {
-		return r.ips
+	if (r.ips == nil || time.Since(r.at) >= r.Interval) && !r.refreshing {
+		r.refreshing = true
+		go r.Refresh(domains)
 	}
+	return r.ips
+}
+
+// Refresh resolves domains now. On failure (offline) the last good set is
+// kept. A name answered with 0.0.0.0 or loopback (sinkholed) teaches nothing.
+func (r *Resolver) Refresh(domains []string) {
 	lookup := r.Lookup
 	if lookup == nil {
-		lookup = net.LookupHost
+		lookup = func(h string) ([]string, error) {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			return net.DefaultResolver.LookupHost(ctx, h)
+		}
 	}
 	fresh := map[string]string{}
 	for _, d := range domains {
@@ -112,15 +127,16 @@ func (r *Resolver) IPs(domains []string) map[string]string {
 		}
 		for _, a := range addrs {
 			if ip := net.ParseIP(a); ip != nil && !ip.IsUnspecified() && !ip.IsLoopback() {
-				fresh[ip.String()] = d // a sinkholed name (0.0.0.0) teaches nothing
+				fresh[ip.String()] = d
 			}
 		}
 	}
-	r.at = time.Now()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.at, r.refreshing = time.Now(), false
 	if len(fresh) > 0 || r.ips == nil {
 		r.ips = fresh
 	}
-	return r.ips
 }
 
 // Dedupe reports each (program, host) pair at most once per window, so

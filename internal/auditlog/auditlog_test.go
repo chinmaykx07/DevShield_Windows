@@ -12,7 +12,7 @@ import (
 func newLog(t *testing.T, n int) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "audit.log")
-	l, err := Open(path)
+	l, _, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +55,7 @@ func wantTamper(t *testing.T, path, fragment string) {
 
 func TestIntactLogVerifiesAndSurvivesReopen(t *testing.T) {
 	path := newLog(t, 5)
-	l, err := Open(path)
+	l, _, err := Open(path)
 	if err != nil {
 		t.Fatalf("reopen of intact log: %v", err)
 	}
@@ -121,21 +121,77 @@ func TestRecomputedHashStillBreaksTheChain(t *testing.T) {
 	wantTamper(t, path, "line 3")
 }
 
-func TestOpenOnTamperedLogStillAppends(t *testing.T) {
+// A broken log is kept aside as evidence and a fresh log is started, so
+// records written afterwards verify (appending onto the broken file used to
+// reuse sequence numbers and could never verify again).
+func TestOpenOnTamperedLogStartsFreshAndKeepsEvidence(t *testing.T) {
 	path := newLog(t, 3)
 	lines := readLines(t, path)
 	lines[0] = strings.Replace(lines[0], `"detail a"`, `"detail x"`, 1)
 	writeLines(t, path, lines)
 
-	l, err := Open(path)
-	var ce *ChainError
-	if !errors.As(err, &ce) || l == nil {
-		t.Fatalf("Open should return the log AND a ChainError, got l=%v err=%v", l, err)
+	l, info, err := Open(path)
+	if err != nil || l == nil || info.Broken == nil || info.Aside == "" {
+		t.Fatalf("Open = %v, %+v, %v", l, info, err)
 	}
-	if _, err := l.Append("AUDIT_TAMPER_DETECTED", ce.Error(), "fail", "test"); err != nil {
+	if _, err := l.Append("AUDIT_TAMPER_DETECTED", info.Broken.Error(), "fail", "test"); err != nil {
 		t.Fatal(err)
 	}
 	l.Close()
+	if n, err := Verify(path); err != nil || n != 1 {
+		t.Fatalf("new log after a break does not verify: %d %v", n, err)
+	}
+	if _, err := Verify(info.Aside); err == nil {
+		t.Fatal("the evidence file no longer shows the break")
+	}
+}
+
+// Verifying while another goroutine appends must never report tampering
+// (found in review: 1 false report in 3000 runs).
+func TestVerifyDuringAppendsIsNotTamper(t *testing.T) {
+	path := newLog(t, 1)
+	l, _, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 400; i++ {
+			l.Append("X", strings.Repeat("d", i%50), "ok", "test")
+		}
+	}()
+	for {
+		select {
+		case <-done:
+			l.Close()
+			return
+		default:
+			if _, err := Verify(path); err != nil {
+				t.Fatalf("false tamper report during appends: %v", err)
+			}
+		}
+	}
+}
+
+// A record cut short by a crash (never confirmed by the head) is removed
+// on open instead of breaking the log forever.
+func TestTornFinalRecordIsTrimmed(t *testing.T) {
+	path := newLog(t, 3)
+	f, _ := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
+	f.WriteString(`{"seq":4,"time":"2026-`)
+	f.Close()
+	l, info, err := Open(path)
+	if err != nil || info.Broken != nil || info.TornBytes == 0 {
+		t.Fatalf("Open = %+v, %v", info, err)
+	}
+	if r, _ := l.Append("NEXT", "", "ok", "test"); r.Seq != 4 {
+		t.Fatalf("next seq %d, want 4", r.Seq)
+	}
+	l.Close()
+	if n, err := Verify(path); err != nil || n != 4 {
+		t.Fatalf("Verify = %d, %v", n, err)
+	}
 }
 
 func TestTail(t *testing.T) {

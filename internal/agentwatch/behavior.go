@@ -27,6 +27,9 @@ type fastProc struct {
 	PID  int32
 	PPID int32
 	Name string
+	// Interactive: the process has a controlling terminal (Linux: a tty).
+	// A shell like that is a human typing, not an agent running commands.
+	Interactive bool
 }
 
 type spawnEvent struct {
@@ -58,8 +61,12 @@ const maxShellHops = 3
 // observe records every tool/shell process that appeared since the
 // previous call. Agents run commands THROUGH shells (agent → pwsh -c
 // "whoami" → whoami), so a new process is credited to its parent and,
-// while that parent is a shell, to the shell's parent too — up to the
-// first non-shell ancestor, which is the process that decided to run it.
+// while that parent is a non-interactive shell, to the shell's parent too
+// — up to the first non-shell ancestor, which is the process that decided
+// to run it. An interactive shell (a human at a terminal, e.g. in an IDE's
+// built-in terminal) stops the climb: what a person types is not the
+// IDE's doing. A process whose name changed since the last call (fork,
+// then exec) counts as new.
 //
 // The first call only learns what already exists — processes running
 // before DevShield started are not counted as spawns.
@@ -85,7 +92,7 @@ func (t *spawnTracker) observe(procs []fastProc, now time.Time, isTool, isShell 
 	if t.primed {
 		for _, p := range procs {
 			name := strings.ToLower(p.Name)
-			if _, seen := t.known[p.PID]; seen || !isTool(name) {
+			if old, seen := t.known[p.PID]; (seen && strings.EqualFold(old.Name, p.Name)) || !isTool(name) {
 				continue
 			}
 			ev := spawnEvent{at: now, name: name}
@@ -93,7 +100,7 @@ func (t *spawnTracker) observe(procs []fastProc, now time.Time, isTool, isShell 
 			for hop := 0; hop < maxShellHops && ancestor != 0; hop++ {
 				t.spawned[ancestor] = append(t.spawned[ancestor], ev)
 				parent, ok := lookup(ancestor)
-				if !ok || !isShell(strings.ToLower(parent.Name)) {
+				if !ok || !isShell(strings.ToLower(parent.Name)) || parent.Interactive {
 					break
 				}
 				ancestor = parent.PPID

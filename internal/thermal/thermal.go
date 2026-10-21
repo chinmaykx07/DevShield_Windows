@@ -235,9 +235,19 @@ func Apply(c Caps, profile, stateDir string) (Result, error) {
 				res.Skipped = append(res.Skipped, fmt.Sprintf("%s: %v", w.What, rootErr(err)))
 				continue
 			}
-			// Required write failed → put back everything written so far.
+			// Required write failed → put back everything written so far,
+			// and say exactly what could not be put back.
+			var stuck []string
 			for i := len(done) - 1; i >= 0; i-- {
-				_ = os.WriteFile(done[i].path, []byte(done[i].old), 0)
+				if done[i].old == "" {
+					continue // was unreadable: nothing known to restore
+				}
+				if werr := os.WriteFile(done[i].path, []byte(done[i].old), 0); werr != nil || readString(done[i].path) != done[i].old {
+					stuck = append(stuck, done[i].path)
+				}
+			}
+			if len(stuck) > 0 {
+				return Result{}, fmt.Errorf("%s failed (%v); these earlier changes could NOT be undone: %s — run 'sudo devshield profile off'", w.What, rootErr(err), strings.Join(stuck, ", "))
 			}
 			return Result{}, fmt.Errorf("%s failed (%v); all changes from this apply were undone", w.What, rootErr(err))
 		}
@@ -281,6 +291,8 @@ func Off(stateDir string) ([]string, error) {
 			}
 			if err := os.WriteFile(p, []byte(b.Values[p]), 0); err != nil {
 				failed = append(failed, fmt.Sprintf("%s: %v", p, rootErr(err)))
+			} else if got := readString(p); got != b.Values[p] && !sameSelection(got, b.Values[p]) {
+				failed = append(failed, fmt.Sprintf("%s: wrote %s, reads back %s", p, b.Values[p], got))
 			}
 		}
 		if len(failed) == 0 {

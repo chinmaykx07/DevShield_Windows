@@ -200,3 +200,18 @@ The Go tray deletes `evt_*.json` within about 2s of ingesting them. Several scri
 6. **Profiles:** set DC values too, drop or back up the `PROCESSOREFFICIENCYCLASSCODE` block, restore the display timeout when switching, and say "no sensor data" instead of reporting a pass.
 7. **Release:** make `dsVersion` a `var`, use `CGO_ENABLED=0`, build the installer in CI, and fix uninstall cleanup.
 8. Update the docs to match.
+
+---
+
+## 7. Added by the 2026-10-21 audit (independent re-review)
+
+**Status of C1–C8 in the current code:** C7 is fixed. C1–C6 and C8 are **still unfixed**: the scripts have not changed since commit `15989a8`.
+
+**New Windows-side findings** (Go tray; read, not run, since pwsh is not available here):
+- **W1. The UAC fallback can't start any script** (`ps_bridge.go:169-171`). The `-File \"%s\"` sits inside a PowerShell single-quoted string, so pwsh receives backslash+quote and the path is cut at the first space (or keeps literal quotes). Today schtasks always fails (C1), so this fallback is the only path left, and it doesn't work either.
+- **W2. A profile apply that times out is logged as success** (`ps_bridge.go:139-145` with `thermal.go:111-124`). `RunTaskAndWait` returns the old state with a nil error on timeout, and the tray logs `PROFILE_APPLY_DONE … ok`. The status line also stays at "Applying…" whenever the mode doesn't change.
+- **W3. Tray buttons fail silently** (`tray.go:234-260`). Privacy Apply ignores the `RunTask` error and resets its label at once. Guardian Start lacks `-Start` (C3). Guardian Stop starts a new non-elevated process that can't see the `Start-Job` job (C5).
+- **W4. Sanction can approve the wrong agent** (`tray_agents.go:62-69`). A menu slot can be refilled with a different agent between reading and clicking. The click should carry the agent's fingerprint, not the slot number.
+- **W5. Event files can collide or get stuck** (`audit.go:199-203, 382-385`). IDs are timestamps written with `INSERT OR REPLACE`, so a collision overwrites an event. An unparseable `evt_*.json` is retried every 2 s forever instead of being quarantined.
+
+**Fixed in this audit on the Windows side:** the tray no longer contacts GitHub on its own: update checks are manual, from the tray menu. `dsVersion` is now a `var`, so `-X` stamping works (verified with a Linux build). The Windows build compiles with `CGO_ENABLED=0` (verified by cross-compiling); `build.bat` and CI still set CGO and install TDM-GCC, which can be dropped (item 7 above).

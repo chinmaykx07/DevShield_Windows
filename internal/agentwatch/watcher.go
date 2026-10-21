@@ -331,9 +331,9 @@ func shortID(fingerprint string) string {
 // hashTarget picks the file whose change should revoke approval: the
 // script for node/python/uvx agents, otherwise the executable.
 func hashTarget(a *RunningAgent) string {
-	if a.Target != "" {
-		if st, err := os.Stat(a.Target); err == nil && !st.IsDir() {
-			return a.Target
+	if a.Script != "" {
+		if st, err := os.Stat(a.Script); err == nil && !st.IsDir() {
+			return a.Script
 		}
 	}
 	return a.Exe
@@ -479,6 +479,9 @@ func (w *Watcher) collect(cat *AgentCatalog) (Snapshot, error) {
 			c.info.Exe, _ = p.Exe()
 			c.info.Cmdline, _ = p.Cmdline()
 			c.info.User, _ = p.Username()
+			if isGenericRuntime(c.info.Name) {
+				c.info.Cwd, _ = p.Cwd() // to resolve "python agent.py" to a real file
+			}
 			if env, err := p.Environ(); err == nil {
 				c.envLLM = llmEnvValues(env, cat.LLMEnvVars)
 				c.envRead = true
@@ -514,10 +517,12 @@ func (w *Watcher) collect(cat *AgentCatalog) (Snapshot, error) {
 			continue
 		}
 		parent, ok := w.procCache[c.info.PPID]
-		var parentVars map[string]string
-		if ok && parent.envRead {
-			parentVars = parent.envLLM
+		if !ok || !parent.envRead {
+			// Parent gone or unreadable: introduced and inherited keys can't
+			// be told apart, so this signal is not credited (no guessing).
+			continue
 		}
+		parentVars := parent.envLLM
 		parentName := strings.ToLower(parent.info.Name)
 		parentIsShell := ok && (cat.shells[parentName] || cat.termHosts[parentName])
 		b.EnvHits = envHitsIntroduced(c.envLLM, parentVars, parentIsShell, w.ownEnv)
@@ -726,6 +731,9 @@ func (w *Watcher) setStatus(fingerprint, status, event string) error {
 // ResolveID maps a short agent ID (as shown by the CLI) or a full
 // fingerprint to a fingerprint among the running agents.
 func (w *Watcher) ResolveID(id string) (string, error) {
+	if len(id) < 4 {
+		return "", fmt.Errorf("agent id %q is too short: use at least 4 characters of the ID shown by 'devshield agents'", id)
+	}
 	var match []string
 	for _, a := range w.Running() {
 		if a.Fingerprint == id || strings.HasPrefix(a.ID, strings.ToLower(id)) {
@@ -756,6 +764,9 @@ func (w *Watcher) ResolveKnown(id string) (fingerprint, name, short string, err 
 	}
 	if w.cfg.DB == nil {
 		return "", "", "", fmt.Errorf("no agent with id %q", id)
+	}
+	if len(id) < 4 {
+		return "", "", "", fmt.Errorf("agent id %q is too short: use at least 4 characters", id)
 	}
 	recs, err := listAgents(w.cfg.DB)
 	if err != nil {

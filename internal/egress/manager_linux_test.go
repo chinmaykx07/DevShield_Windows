@@ -62,6 +62,8 @@ func newTestManager(t *testing.T, nft *fakeNft, dir string) *Manager {
 var wg0 = Lockdown{Interfaces: []string{"wg0"}, Endpoints: []string{"203.0.113.5:51820/udp"}}
 
 func TestUnconfirmedLockdownReverts(t *testing.T) {
+	MinConfirm = 0
+	defer func() { MinConfirm = 10 * time.Second }()
 	nft, dir := &fakeNft{}, t.TempDir()
 	m := newTestManager(t, nft, dir)
 	if err := m.LockdownOn(wg0, 50*time.Millisecond); err != nil {
@@ -140,35 +142,45 @@ func TestEnsureLoadedRestoresFlushedRules(t *testing.T) {
 	}
 }
 
-// The kernel's listing (counters, bursts) must compare equal to our script.
-func TestRuleShapeMatchesNftListing(t *testing.T) {
-	script, _ := Render(Policy{Lockdown: &Lockdown{Interfaces: []string{"lo2"}}, KillFlows: []Flow{{Proto: "tcp", LocalPort: 8080}}})
-	listing := `table inet devshield {
-	chain egress {
-		type filter hook output priority filter; policy accept;
-		tcp sport 8080 counter packets 0 bytes 0 drop comment "quarantined socket"
-		oifname "lo" accept
-		ct direction reply accept comment "replies to inbound connections"
-		oifname "lo2" accept comment "tunnel"
-		udp dport { 67, 547 } accept comment "dhcp"
-		icmpv6 type { nd-router-solicit, nd-neighbor-solicit, nd-neighbor-advert } accept comment "ipv6 neighbour discovery"
-		log prefix "devshield-lockdown-drop " level info limit rate 5/minute burst 5 packets
-		counter packets 3 bytes 180 drop comment "devshield lockdown: everything else"
+// testdata holds a ruleset DevShield rendered and the same ruleset as nft
+// 1.0.9 listed it back from the kernel (counters, sorted sets, reordered
+// matches): they must compare equal, and any real edit must not.
+func TestCanonRulesMatchRealNftListing(t *testing.T) {
+	r, _ := os.ReadFile("testdata/rendered.nft")
+	l, _ := os.ReadFile("testdata/listed-by-nft-1.0.9.nft")
+	want, have := canonRules(string(r)), canonRules(string(l))
+	if len(want) < 20 || !slices.Equal(want, have) {
+		t.Fatalf("rendered and listed differ:\n%v\n%v", want, have)
 	}
-}`
-	if a, b := ruleShape(script), ruleShape(listing); !slices.Equal(a, b) || len(a) != 8 {
-		t.Fatalf("shapes differ:\n%v\n%v", a, b)
+	for _, edit := range [][2]string{
+		{`oifname "wg0" accept`, `oifname "eth0" accept`}, // tunnel swapped
+		{"203.0.113.5", "203.0.113.6"},                    // endpoint moved
+		{"meta skuid 65534", "meta skuid 0"},              // allowed user changed
+		{"devshield lockdown: everything else\"", "x\""},  // comment is part of the rule too
+	} {
+		tampered := strings.Replace(string(l), edit[0], edit[1], 1)
+		if tampered == string(l) {
+			t.Fatalf("test edit %q not found", edit[0])
+		}
+		if slices.Equal(want, canonRules(tampered)) {
+			t.Errorf("edit %q -> %q not detected", edit[0], edit[1])
+		}
 	}
 }
 
-func TestTidyDropsRulesOfClosedSockets(t *testing.T) {
-	proc := t.TempDir()
+func TestTidyKeepsOnlyFlowsOwnedByQuarantinedProcesses(t *testing.T) {
+	proc, cg := t.TempDir(), t.TempDir()
 	os.MkdirAll(filepath.Join(proc, "net"), 0o755)
-	os.MkdirAll(filepath.Join(proc, "4242"), 0o755)
-	// One live listener on 127.0.0.1:631.
+	os.MkdirAll(filepath.Join(proc, "4242", "fd"), 0o755)
+	os.MkdirAll(filepath.Join(cg, QuarantineCgroup), 0o755)
+	os.WriteFile(filepath.Join(cg, QuarantineCgroup, "cgroup.procs"), []byte("4242\n"), 0o644)
+	// 127.0.0.1:631 is owned by quarantined 4242 (socket inode 18311);
+	// 8080 is now some other program's (inode 99) and must lose the rule.
+	os.Symlink("socket:[18311]", filepath.Join(proc, "4242", "fd", "3"))
 	os.WriteFile(filepath.Join(proc, "net", "tcp"), []byte("  sl  local_address rem_address   st\n"+
-		"   0: 0100007F:0277 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 18311 1\n"), 0o644)
-	m := &Manager{cfg: Config{ProcRoot: proc}, st: state{Blocked: map[string]*Member{"fp": {
+		"   0: 0100007F:0277 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 18311 1\n"+
+		"   1: 00000000:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 99 1\n"), 0o644)
+	m := &Manager{cfg: Config{ProcRoot: proc}, cgRoot: cg, st: state{Blocked: map[string]*Member{"fp": {
 		Origins: map[int]string{4242: "/a", 999999: "/b"},
 		Flows:   []Flow{{Proto: "tcp", LocalIP: "127.0.0.1", LocalPort: 631}, {Proto: "tcp", LocalPort: 8080}},
 	}}}}
@@ -181,34 +193,137 @@ func TestTidyDropsRulesOfClosedSockets(t *testing.T) {
 	}
 }
 
-func TestFindCgroup2AndDescendants(t *testing.T) {
-	proc := t.TempDir()
-	os.MkdirAll(filepath.Join(proc, "self"), 0o755)
-	os.WriteFile(filepath.Join(proc, "self", "mountinfo"), []byte(
-		"37 24 0:29 / /sys/fs/cgroup rw - tmpfs tmpfs rw\n"+
-			"50 37 0:40 / /sys/fs/cgroup/unified rw - cgroup2 cgroup2 rw\n"+
-			"51 37 0:40 / /mnt/elsewhere rw - cgroup2 cgroup2 rw\n"), 0o644)
-	// Hybrid layout, made reachable under the fake /proc/self/root.
-	os.MkdirAll(filepath.Join(proc, "self", "root", "sys/fs/cgroup/unified"), 0o755)
-	os.WriteFile(filepath.Join(proc, "self", "root", "sys/fs/cgroup/unified/cgroup.procs"), nil, 0o644)
-	if got := findCgroup2(proc); got != "/sys/fs/cgroup/unified" {
-		t.Fatalf("cgroup2 mount = %q", got)
+// An unconfirmed lockdown must never reach disk, whatever else saves
+// meanwhile, and the revert must be saved (found in review).
+func TestUnconfirmedLockdownNeverPersisted(t *testing.T) {
+	MinConfirm = 0
+	defer func() { MinConfirm = 10 * time.Second }()
+	nft, dir := &fakeNft{}, t.TempDir()
+	m := newTestManager(t, nft, dir)
+	if err := m.LockdownOn(wg0, 80*time.Millisecond); err != nil {
+		t.Fatal(err)
 	}
-	for pid, stat := range map[string]string{
-		"100": "100 (agent) S 1 ...",
-		"101": "101 (bash) S 100 ...",
-		"102": "102 (curl) S 101 ...",
-		"200": "200 (weird ) name) S 1 ...",
-	} {
+	m.mu.Lock()
+	m.save() // e.g. Reconcile or Block saving during the window
+	m.mu.Unlock()
+	if data, _ := os.ReadFile(filepath.Join(dir, "egress.json")); strings.Contains(string(data), "wg0") {
+		t.Fatal("unconfirmed lockdown persisted by a later save")
+	}
+	time.Sleep(300 * time.Millisecond)
+	if m2 := newTestManager(t, &fakeNft{}, dir); m2.Status().Lockdown != nil {
+		t.Fatal("reverted lockdown came back after restart")
+	}
+}
+
+// A timer that already fired must not revert a newer lockdown.
+func TestStaleTimerDoesNotRevertNewerLockdown(t *testing.T) {
+	MinConfirm = 0
+	defer func() { MinConfirm = 10 * time.Second }()
+	nft := &fakeNft{}
+	m := newTestManager(t, nft, t.TempDir())
+	m.LockdownOn(wg0, 50*time.Millisecond)
+	m.mu.Lock() // hold the lock so the first timer fires and waits
+	time.Sleep(100 * time.Millisecond)
+	m.mu.Unlock()
+	if err := m.LockdownOn(Lockdown{Interfaces: []string{"tun0"}}, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if l := m.Status().Lockdown; l == nil || l.Interfaces[0] != "tun0" {
+		t.Fatalf("newer lockdown reverted by a stale timer: %+v", l)
+	}
+}
+
+func TestConfirmWindowTooShortRefused(t *testing.T) {
+	m := newTestManager(t, &fakeNft{}, t.TempDir())
+	for _, d := range []time.Duration{-time.Second, 500 * time.Millisecond} {
+		if err := m.LockdownOn(wg0, d); err == nil {
+			t.Errorf("confirm window %s accepted", d)
+		}
+	}
+}
+
+// If nft refuses, memory must keep matching the kernel.
+func TestFailedOffKeepsLockdownState(t *testing.T) {
+	nft := &fakeNft{}
+	m := newTestManager(t, nft, t.TempDir())
+	m.LockdownOn(wg0, 0)
+	nft.reject = true
+	if err := m.LockdownOff(); err == nil {
+		t.Fatal("expected error")
+	}
+	if m.Status().Lockdown == nil {
+		t.Fatal("status says off while the kernel still enforces the lockdown")
+	}
+}
+
+// With nothing to enforce, a leftover table is drift too.
+func TestLeftoverTableWithEmptyPolicyIsDetected(t *testing.T) {
+	nft := &fakeNft{}
+	m := newTestManager(t, nft, t.TempDir())
+	nft.loaded = append(nft.loaded, "table inet devshield {\n\tchain egress {\n\t\tcounter drop\n\t}\n}\n")
+	if again, _ := m.EnsureLoaded(); !again || strings.Contains(nft.last(), "chain egress") {
+		t.Fatal("leftover table not removed")
+	}
+}
+
+// An unreadable state file must not open a lockdown: the kernel is left
+// alone and only restore-all may proceed.
+func TestCorruptStateFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "egress.json"), []byte("{not json"), 0o600)
+	nft := &fakeNft{}
+	m, err := New(Config{StateDir: dir, ProcRoot: t.TempDir(), Nft: nft.run, NftList: nft.list})
+	if err == nil || m == nil {
+		t.Fatalf("New = %v, %v", m, err)
+	}
+	if len(nft.loaded) != 0 {
+		t.Fatal("kernel rules changed despite unreadable state")
+	}
+	if again, _ := m.EnsureLoaded(); again {
+		t.Fatal("EnsureLoaded acted on unreadable state")
+	}
+	if err := m.LockdownOff(); err == nil {
+		t.Fatal("change allowed while state is unreadable")
+	}
+	if m.Status().Problem == "" {
+		t.Fatal("status hides the problem")
+	}
+	if _, err := m.Reset(); err != nil || m.Status().Problem != "" {
+		t.Fatalf("restore-all could not start clean: %v", err)
+	}
+	matches, _ := filepath.Glob(filepath.Join(dir, "egress.json.corrupt-*"))
+	if len(matches) != 1 {
+		t.Fatal("unreadable file not kept for inspection")
+	}
+}
+
+// Disallow must not leave an untraceable helper with the allowance.
+func TestDisallowRemovesOrphans(t *testing.T) {
+	proc, cg := t.TempDir(), t.TempDir()
+	for pid, stat := range map[string]string{"100": "100 (agent) S 1 x", "200": "200 (helper) S 1 x"} {
 		os.MkdirAll(filepath.Join(proc, pid), 0o755)
 		os.WriteFile(filepath.Join(proc, pid, "stat"), []byte(stat), 0o644)
 	}
-	d := descendants(proc, []int{100})
-	if len(d) != 2 || !d[101] || !d[102] {
-		t.Fatalf("descendants = %v", d)
+	os.MkdirAll(filepath.Join(cg, AllowedCgroup), 0o755)
+	os.MkdirAll(filepath.Join(cg, "a"), 0o755)
+	os.WriteFile(filepath.Join(cg, AllowedCgroup, "cgroup.procs"), []byte("100\n200\n"), 0o644)
+	var events []string
+	nft := &fakeNft{}
+	m := &Manager{cfg: Config{ProcRoot: proc, Nft: nft.run, NftList: nft.list, StateDir: t.TempDir(),
+		Emit: func(a, d, s string) { events = append(events, a) }}, cgRoot: cg, nftBase: cg,
+		st: state{Blocked: map[string]*Member{}, Allowed: map[string]*Member{"fp": {ID: "x", Origins: map[int]string{100: "/a"}}}}}
+	if err := m.Disallow("fp"); err != nil {
+		t.Fatal(err)
 	}
-	if o, ok := originFor(parents(proc), 102, map[int]string{100: "/user.slice"}); !ok || o != "/user.slice" {
-		t.Fatalf("origin = %q %v", o, ok)
+	if got, _ := os.ReadFile(filepath.Join(cg, "a", "cgroup.procs")); string(got) != "100" {
+		t.Errorf("agent not returned to its origin: %q", got)
+	}
+	if got, _ := os.ReadFile(filepath.Join(cg, "cgroup.procs")); string(got) != "200" {
+		t.Errorf("orphan helper kept the allowance: root got %q", got)
+	}
+	if !slices.Contains(events, "EGRESS_RELEASE_ORPHANS") {
+		t.Errorf("orphans not reported: %v", events)
 	}
 }
 

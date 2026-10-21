@@ -131,3 +131,52 @@ func TestOffWithoutBlockIsANoOp(t *testing.T) {
 		t.Fatalf("Off on clean file: removed=%v err=%v", removed, err)
 	}
 }
+
+// Found in review: with the end marker missing, every line after the start
+// marker counted as managed and was deleted.
+func TestMissingEndMarkerRefusesToEdit(t *testing.T) {
+	content := userHosts + beginMark + "\n0.0.0.0 x.example\n10.0.0.9 printer.home\n"
+	root := setup(t, content, "")
+	if _, err := Apply(root, t.TempDir(), mustList(t)); err == nil {
+		t.Fatal("applied to a file with an unterminated block")
+	}
+	if _, err := Off(root); err == nil {
+		t.Fatal("removed an unterminated block")
+	}
+	if readHosts(t, root) != content {
+		t.Fatal("file changed although DevShield refused")
+	}
+	if st := Check(root, mustList(t)); !strings.Contains(strings.Join(st.Warnings, " "), "no end marker") {
+		t.Errorf("status hides the problem: %v", st.Warnings)
+	}
+}
+
+// A line the user added inside DevShield's block is theirs: kept, not dropped.
+func TestUserLineInsideBlockIsKept(t *testing.T) {
+	root, state := setup(t, userHosts, ""), t.TempDir()
+	if _, err := Apply(root, state, mustList(t)); err != nil {
+		t.Fatal(err)
+	}
+	withUser := strings.Replace(readHosts(t, root), endMark, "10.0.0.9 printer.home\n"+endMark, 1)
+	os.WriteFile(filepath.Join(root, "etc/hosts"), []byte(withUser), 0o644)
+	if _, err := Apply(root, state, mustList(t)); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(readHosts(t, root), "10.0.0.9 printer.home") {
+		t.Fatal("re-apply dropped the user's line")
+	}
+	Off(root)
+	if !strings.Contains(readHosts(t, root), "10.0.0.9 printer.home") {
+		t.Fatal("off dropped the user's line")
+	}
+}
+
+func TestUnreadableOverrideIsAnError(t *testing.T) {
+	dir := t.TempDir() // a directory: exists but cannot be read as a file
+	if _, err := LoadList(dir); err == nil {
+		t.Fatal("unreadable override silently replaced by the built-in list")
+	}
+	if _, err := LoadList(filepath.Join(dir, "absent.json")); err != nil {
+		t.Fatalf("absent override must fall back to the built-in list: %v", err)
+	}
+}

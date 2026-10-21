@@ -17,15 +17,15 @@ Status: decisions taken 2026-10-20 (section 7). Section 8 covers the owner-sover
 
 | Area | State |
 |---|---|
-| Go tray core | Builds and vets for Windows and Linux. 21 unit tests. Quit deadlock fixed. |
-| Agent Watch (AI/rogue agents) | Built behaviour-first. Tested on Linux, live rogue test passes. **Not run on Windows.** |
+| Go core | Builds and vets for Windows and Linux. 100 unit-test functions (race detector clean), plus a live Linux suite (`test/linux-live/`, 73 checks per cgroup layout). |
+| Agent Watch (AI/rogue agents) | Behaviour plus catalog identity. Unit-tested, including the false positives found in the 2026-10-21 audit. Its live use is the fake agent in `test/linux-live/`. **Not run on Windows.** |
 | PowerShell features (profiles, privacy, Tor, guardian, rollback, dashboard) | **Windows-only and largely non-functional as wired.** Tasks never register, prompts block, rollback restores nothing, the guardian crashes, the Tor kill-switch blocks nothing. See the review notes. |
-| Linux support | Agent Watch collectors only. Everything else is Windows-specific. |
-| Packaging | Windows Inno Setup + winget manifests (installer is never built by CI). Nothing for Linux. |
+| Linux support | Root daemon + CLI: Agent Watch, network block/allow/lockdown, sinkhole, LAN privacy, network monitor, thermal, sensors, restore-all. See the progress list for how each is tested. Not yet run under systemd; no tray. |
+| Packaging | Windows: Inno Setup + winget manifests (installer never built by CI). Linux: systemd units in `packaging/linux/`, no .deb/.rpm yet. |
 
 ## 3. Efficiency: measured, with budgets
 
-Measured in this container (78 processes):
+Measured once, by hand, in this development container (78 processes), before the 2026-10-21 changes. There is no benchmark script in the repo, so these numbers can't yet be reproduced, and nothing has been measured on Windows or on a busy desktop. (The connection scan reads every process's open files, and big program files are hashed on first sight, so a busier machine will cost more.)
 
 | What | Before | After | Note |
 |---|---|---|---|

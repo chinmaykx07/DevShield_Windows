@@ -16,13 +16,27 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 )
 
-// procNameCache: PID → (ppid, name) for PIDs already read. Only the fast
-// tick goroutine touches it, so it needs no lock.
-var procNameCache = map[int32]fastProc{}
+// procNameCache: PID → (ppid, name) for PIDs already read. Shared by
+// every Watcher in the process (it mirrors /proc), so procCacheMu guards it
+// and procRecheck.
+var (
+	procCacheMu   sync.Mutex
+	procNameCache = map[int32]fastProc{}
+)
+
+// procRecheck: young processes still carrying their parent's name (forked
+// but maybe not yet exec'd) are re-read for a few ticks, so a tool started
+// as fork → pause → exec is not hidden behind its parent's name.
+var procRecheck = map[int32]int{}
+
+const forkRechecks = 6 // × 0.5 s
 
 func fastProcList() ([]fastProc, error) {
+	procCacheMu.Lock()
+	defer procCacheMu.Unlock()
 	d, err := os.Open("/proc")
 	if err != nil {
 		return nil, err
@@ -42,7 +56,7 @@ func fastProcList() ([]fastProc, error) {
 		}
 		pid := int32(pid64)
 		alive[pid] = true
-		if p, ok := procNameCache[pid]; ok {
+		if p, ok := procNameCache[pid]; ok && procRecheck[pid] == 0 {
 			out = append(out, p)
 			continue
 		}
@@ -50,12 +64,22 @@ func fastProcList() ([]fastProc, error) {
 		if !ok {
 			continue // exited between listing and reading
 		}
+		if left, rechecking := procRecheck[pid]; rechecking {
+			if left <= 1 || p.Name != procNameCache[pid].Name {
+				delete(procRecheck, pid)
+			} else {
+				procRecheck[pid] = left - 1
+			}
+		} else if parent, ok := procNameCache[p.PPID]; ok && parent.Name == p.Name {
+			procRecheck[pid] = forkRechecks
+		}
 		procNameCache[pid] = p
 		out = append(out, p)
 	}
 	for pid := range procNameCache {
 		if !alive[pid] {
 			delete(procNameCache, pid)
+			delete(procRecheck, pid)
 		}
 	}
 	return out, nil
@@ -77,7 +101,8 @@ func readProcStat(pid int32) (fastProc, bool) {
 		return fastProc{}, false
 	}
 	ppid, _ := strconv.ParseInt(fields[1], 10, 32)
-	return fastProc{PID: pid, PPID: int32(ppid), Name: string(data[open+1 : close])}, true
+	tty := len(fields) > 4 && fields[4] != "0" // field 7 of stat: tty_nr
+	return fastProc{PID: pid, PPID: int32(ppid), Name: string(data[open+1 : close]), Interactive: tty}, true
 }
 
 // processModules lists the shared libraries mapped into pid (lower-case
@@ -112,7 +137,6 @@ func processModules(pid int32) []string {
 // (cron @reboot needs root to read other users' crontabs — Phase 2.)
 func autostartEntries() map[string]string {
 	out := map[string]string{}
-	home, _ := os.UserHomeDir()
 
 	scan := func(dir, glob, key, where string) {
 		files, _ := filepath.Glob(filepath.Join(dir, glob))
@@ -128,13 +152,15 @@ func autostartEntries() map[string]string {
 				}
 				cmd := strings.TrimLeft(strings.TrimPrefix(line, key), "-@!+:") // systemd prefixes
 				if f := strings.Fields(cmd); len(f) > 0 {
-					out[strings.ToLower(f[0])] = where + " (" + filepath.Base(file) + ")"
+					out[autostartKey(f[0], cmd)] = where + " (" + filepath.Base(file) + ")"
 				}
 			}
 		}
 	}
 
-	if home != "" {
+	// Every user's entries, not just the daemon's own (it runs as root).
+	homes, _ := filepath.Glob("/home/*")
+	for _, home := range append(homes, "/root") {
 		scan(filepath.Join(home, ".config/systemd/user"), "*.service", "ExecStart=", "systemd user unit")
 		scan(filepath.Join(home, ".config/autostart"), "*.desktop", "Exec=", "XDG autostart")
 	}

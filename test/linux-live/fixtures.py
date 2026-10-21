@@ -1,8 +1,10 @@
 # Test processes for the live test. One file, several roles:
 #
 #   fixtures.py server DIR        TCP sink on 127.0.0.1:9000/9001; byte counts in DIR/rx<port>
-#   fixtures.py agent DIR         the fake agent: re-execs itself under its agent name
+#   fixtures.py agent DIR         the fake agent: re-execs as a copy of this file named
+#                                 after the agent (identity = the script a runtime runs)
 #   fixtures.py probe [UID]       one UDP send out of dstest0: prints ok or EPERM
+#   fixtures.py udpsend IP PORT [SPORT]   one UDP send to IP:PORT: ok or EPERM
 #   fixtures.py catalog SRC DST   write a catalog with the test agent added
 #
 # The agent's name is assembled here at run time and never written in any
@@ -80,15 +82,22 @@ def main():
     role = sys.argv[1]
     if role == "server":
         server(sys.argv[2])
-    elif role == "agent":  # re-exec under the agent name
-        os.execv(sys.executable, [sys.executable, __file__, "run", sys.argv[2], AGENT])
+    elif role == "agent":  # re-exec as <DIR>/<agent name>.py
+        d = sys.argv[2]
+        script = os.path.join(d, AGENT + ".py")
+        with open(__file__) as src, open(script, "w") as dst:
+            dst.write(src.read())
+        os.environ["DS_FIXTURES"] = os.path.abspath(__file__)
+        os.execv(sys.executable, [sys.executable, script, "run", d, AGENT])
     elif role == "run":
         d = sys.argv[2]
         if sys.argv[3] == AGENT:
             # A child that is part of the agent (its name matches) and a
             # neutral helper that Agent Watch does not identify.
+            # The child runs the agent's own script (part of the agent); the
+            # helper runs the neutral fixtures.py (not identified as it).
             kids = [subprocess.Popen([sys.executable, __file__, "run", d, AGENT + "-child"]),
-                    subprocess.Popen([sys.executable, __file__, "helper", d])]
+                    subprocess.Popen([sys.executable, os.environ["DS_FIXTURES"], "helper", d])]
             with open(f"{d}/kids.pid", "w") as f:
                 f.write(" ".join(str(k.pid) for k in kids))
             worker(d, "agent", hold=True)
@@ -101,6 +110,15 @@ def main():
             os.setgid(65534)
             os.setuid(int(sys.argv[2]))
         print(udp_ok().split()[1])
+    elif role == "udpsend":
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        if len(sys.argv) > 4:
+            s.bind(("0.0.0.0", int(sys.argv[4])))
+        try:
+            s.sendto(b"x", (sys.argv[2], int(sys.argv[3])))
+            print("ok")
+        except PermissionError:
+            print("EPERM")
     elif role == "catalog":
         c = json.load(open(sys.argv[2]))
         c["agents"].append({"name": "Live Test Agent", "vendor": "test", "kind": "cli", "cmdline_patterns": [AGENT]})

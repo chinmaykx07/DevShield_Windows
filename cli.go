@@ -1,32 +1,22 @@
-// cli.go — command-line interface.
-//
-//	devshield                      start the tray (Windows today)
-//	devshield daemon [flags]       run the privileged service (Linux, as root)
-//	devshield status               daemon health and audit-log integrity
-//	devshield agents               running AI agents and verdicts
-//	devshield events [-n 20]       recent audit events
-//	sudo devshield sanction <id>   approve an agent (root only)
-//	sudo devshield revoke <id>     withdraw an approval (root only)
-//	devshield verify-log [path]    check the audit log's hash chain offline
-//	devshield sensors [--json]     temperatures, fans, power (no daemon needed)
-//	devshield profile              thermal controls, active profile, temps
-//	sudo devshield profile <name>  silent | gaming | dev | off (root only)
-//	devshield sinkhole [on|off]    telemetry sinkhole in /etc/hosts (changes need root)
-//	sudo devshield block <id>      cut one agent off the network (Linux)
-//	devshield egress               network quarantine and lockdown status
-//	sudo devshield lockdown on …   only a tunnel / Tor / chosen users may go out
+// cli.go — command-line interface. The full, current command list is
+// cliUsage below (printed by "devshield help"); keep it the only list.
+// Everything except "help", "version" and "verify-log" talks to the Linux
+// daemon; there is no Windows daemon yet.
 
 package main
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/signal"
 	"os/user"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -49,7 +39,8 @@ Usage:
   devshield events [-n N]         recent audit events
   sudo devshield sanction <id>    approve an agent (requires root)
   sudo devshield revoke <id>      withdraw an approval (requires root)
-  devshield verify-log [path]     verify an audit log's hash chain offline
+  sudo devshield verify-log [path] verify an audit log's hash chain offline
+                                  (exit 3 = tampered, 1 = could not read it)
   devshield sensors [--json]      temperatures, fans and power (no daemon needed)
   devshield profile               thermal controls, active profile and temperatures
   sudo devshield profile <name>   silent | gaming | dev | off (off = original settings)
@@ -128,6 +119,10 @@ func runCLI(args []string, stdout, stderr io.Writer) int {
 		}
 		return cliPolicy(cmd, cargs[0], socket, stdout, stderr)
 	case "sensors":
+		if runtime.GOOS != "linux" {
+			fmt.Fprintln(stderr, "devshield sensors reads Linux's hardware sensors (/sys); on Windows use the tray's dashboard")
+			return 2
+		}
 		return cliSensors(cargs, stdout)
 	case "profile":
 		if len(cargs) == 0 {
@@ -341,7 +336,11 @@ func cliEvents(args []string, socket string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	for _, e := range resp.Events {
-		fmt.Fprintf(stdout, "%6d  %s  %-4s  %-26s %s\n", e.Seq, e.Time[:19], e.Status, e.Action, e.Detail)
+		ts := e.Time
+		if len(ts) > 19 {
+			ts = ts[:19]
+		}
+		fmt.Fprintf(stdout, "%6d  %-19s  %-4s  %-26s %s\n", e.Seq, ts, e.Status, e.Action, e.Detail)
 	}
 	return 0
 }
@@ -355,10 +354,26 @@ func cliPolicy(op, id, socket string, stdout, stderr io.Writer) int {
 }
 
 func cliVerify(path string, stdout, stderr io.Writer) int {
+	if _, err := os.Stat(path); err != nil {
+		if errors.Is(err, os.ErrPermission) {
+			fmt.Fprintf(stderr, "%s: cannot read it (the state directory is root-only): run with sudo\n", path)
+		} else {
+			fmt.Fprintf(stderr, "%s: no audit log there (%v)\n", path, err)
+		}
+		return 1 // not evidence of tampering either way
+	}
 	n, err := auditlog.Verify(path)
-	if err != nil {
+	var chainErr *auditlog.ChainError
+	switch {
+	case errors.As(err, &chainErr):
 		fmt.Fprintf(stderr, "%s: %v (first %d records are intact)\n", path, err, n)
 		return 3
+	case errors.Is(err, os.ErrPermission):
+		fmt.Fprintf(stderr, "%s: cannot read it: run with sudo\n", path)
+		return 1
+	case err != nil:
+		fmt.Fprintf(stderr, "%s: could not check it: %v\n", path, err)
+		return 1
 	}
 	fmt.Fprintf(stdout, "%s: intact, %d records\n", path, n)
 	return 0
@@ -497,8 +512,12 @@ func cliLockdown(args []string, socket string, stdout, stderr io.Writer) int {
 		if err := fs.Parse(args[1:]); err != nil {
 			return 2
 		}
+		if *confirm < 0 || (*confirm > 0 && *confirm < egress.MinConfirm) {
+			fmt.Fprintf(stderr, "--confirm-within must be at least %s\n", egress.MinConfirm)
+			return 2
+		}
 		req.Lockdown = &ipc.LockdownRequest{Via: via, Endpoints: eps, Users: users, Tor: *tor, OnlyAllowed: *only,
-			LAN: *lan, Strict: *strict, ConfirmSec: int(confirm.Seconds())}
+			LAN: *lan, Strict: *strict, ConfirmSec: int(math.Ceil(confirm.Seconds()))}
 	}
 	resp, ok := call(socket, req, stderr)
 	if !ok {
@@ -576,7 +595,10 @@ func printEgress(e *egress.Status, stdout io.Writer) {
 	if !e.CgroupV2 {
 		fmt.Fprintln(stdout, "  note: cgroup v2 is not mounted, so per-agent blocking is unavailable here")
 	}
-	if !e.RulesLoaded {
+	if e.Problem != "" {
+		fmt.Fprintf(stdout, "  ⚠ %s\n", e.Problem)
+	}
+	if !e.RulesLoaded && e.Problem == "" {
 		fmt.Fprintln(stdout, "  ⚠ the kernel does not have DevShield's firewall table loaded (the daemon re-applies it within 10 s)")
 	}
 }
@@ -660,6 +682,9 @@ func cliLANPrivacy(args []string, socket string, stdout, stderr io.Writer) int {
 		}
 		for _, w := range l.Warnings {
 			fmt.Fprintf(stdout, "  ⚠ %s\n", w)
+		}
+		if l.Partial {
+			fmt.Fprintln(stdout, "  ⚠ only some of DevShield's LAN-privacy files are present: run 'sudo devshield lan-privacy on' again")
 		}
 		if !l.Applied && l.Result == nil {
 			fmt.Fprintln(stdout, "\nTurn on with: sudo devshield lan-privacy on")

@@ -54,8 +54,12 @@ type Group struct {
 func LoadList(overridePath string) (List, error) {
 	data := defaultList
 	if overridePath != "" {
-		if b, err := os.ReadFile(overridePath); err == nil {
+		b, err := os.ReadFile(overridePath)
+		switch {
+		case err == nil:
 			data = b
+		case !errors.Is(err, os.ErrNotExist):
+			return List{}, fmt.Errorf("blocklist override %s: %w", overridePath, err)
 		}
 	}
 	var l List
@@ -112,27 +116,45 @@ func validDomain(d string) bool {
 
 func hostsPath(root string) string { return filepath.Join(root, "/etc/hosts") }
 
+// errUnterminated: a begin marker without an end marker. Everything after
+// it would look managed, so DevShield refuses to edit rather than risk
+// deleting the user's own lines.
+var errUnterminated = errors.New("/etc/hosts has DevShield's start marker but no end marker; refusing to edit it — fix the file by hand (the original is in DevShield's state directory)")
+
 // splitManaged returns the file without the managed block, and the domains
-// currently inside the block.
-func splitManaged(content string) (outside string, managed []string, present bool) {
+// currently inside the block. Lines inside the block that DevShield did
+// not write (anything but its sinkhole entries and comments) are kept with
+// the user's own lines, never dropped.
+func splitManaged(content string) (outside string, managed []string, present bool, err error) {
 	var keep []string
 	in := false
 	for _, line := range strings.Split(content, "\n") {
+		t := strings.TrimSpace(line)
 		switch {
-		case strings.TrimSpace(line) == beginMark:
+		case t == beginMark:
 			in, present = true, true
-		case strings.TrimSpace(line) == endMark:
+		case t == endMark:
+			if !in {
+				return "", nil, false, errors.New("/etc/hosts has DevShield's end marker without a start marker; refusing to edit it — fix the file by hand")
+			}
 			in = false
 		case in:
 			f := strings.Fields(line)
-			if len(f) >= 2 && f[0] == sinkIP {
+			switch {
+			case len(f) >= 2 && f[0] == sinkIP:
 				managed = append(managed, f[1])
+			case t == "" || strings.HasPrefix(t, "#"):
+			default:
+				keep = append(keep, line) // the user's line: keep it
 			}
 		default:
 			keep = append(keep, line)
 		}
 	}
-	return strings.TrimRight(strings.Join(keep, "\n"), "\n"), managed, present
+	if in {
+		return "", nil, false, errUnterminated
+	}
+	return strings.TrimRight(strings.Join(keep, "\n"), "\n"), managed, present, nil
 }
 
 // Apply installs (or refreshes) the managed block. stateDir (root-only)
@@ -146,7 +168,10 @@ func Apply(root, stateDir string, l List) (int, error) {
 	if err := backupOnce(stateDir, orig); err != nil {
 		return 0, fmt.Errorf("could not back up %s, nothing changed: %w", path, err)
 	}
-	outside, _, _ := splitManaged(string(orig))
+	outside, _, _, err := splitManaged(string(orig))
+	if err != nil {
+		return 0, err
+	}
 	domains := l.Domains()
 
 	var b strings.Builder
@@ -158,7 +183,7 @@ func Apply(root, stateDir string, l List) (int, error) {
 	}
 	b.WriteString(endMark + "\n")
 
-	if err := writeInPlace(path, b.String()); err != nil {
+	if err := writeInPlace(path, b.String(), orig); err != nil {
 		return 0, err
 	}
 	return len(domains), nil
@@ -171,11 +196,14 @@ func Off(root string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	outside, _, present := splitManaged(string(orig))
+	outside, _, present, err := splitManaged(string(orig))
+	if err != nil {
+		return false, err
+	}
 	if !present {
 		return false, nil
 	}
-	return true, writeInPlace(path, outside+"\n")
+	return true, writeInPlace(path, outside+"\n", orig)
 }
 
 // Status is what the sinkhole looks like right now, read from disk.
@@ -197,7 +225,10 @@ func Check(root string, l List) Status {
 		st.Warnings = append(st.Warnings, "cannot read /etc/hosts: "+err.Error())
 		return st
 	}
-	_, managed, present := splitManaged(string(data))
+	_, managed, present, err := splitManaged(string(data))
+	if err != nil {
+		st.Warnings = append(st.Warnings, err.Error())
+	}
 	st.Active, st.Blocked = present, len(managed)
 	want := l.Domains()
 	st.Expected = len(want)
@@ -250,8 +281,9 @@ func backupOnce(stateDir string, orig []byte) error {
 // writeInPlace rewrites path keeping its inode, owner and mode. (Renaming a
 // temp file over /etc/hosts fails when it is a bind mount, as in
 // containers.) The content is fully prepared first, so the window with a
-// partial file is a single write.
-func writeInPlace(path, content string) error {
+// partial file is a single write; if that write fails (disk full), the
+// original bytes are written back.
+func writeInPlace(path, content string, orig []byte) error {
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0)
 	if err != nil {
 		if errors.Is(err, os.ErrPermission) {
@@ -259,13 +291,20 @@ func writeInPlace(path, content string) error {
 		}
 		return err
 	}
-	if _, err := f.WriteString(content); err != nil {
-		f.Close()
-		return err
+	_, err = f.WriteString(content)
+	if err == nil {
+		err = f.Sync()
 	}
-	if err := f.Sync(); err != nil {
+	if err != nil {
+		f.Truncate(0)
+		f.Seek(0, 0)
+		if _, rerr := f.Write(orig); rerr != nil {
+			f.Close()
+			return fmt.Errorf("writing /etc/hosts failed (%v) and restoring it failed too (%v): restore it from DevShield's state directory (privacy/hosts.original)", err, rerr)
+		}
+		f.Sync()
 		f.Close()
-		return err
+		return fmt.Errorf("writing /etc/hosts failed, original restored: %w", err)
 	}
 	return f.Close()
 }

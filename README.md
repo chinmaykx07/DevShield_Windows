@@ -1,14 +1,28 @@
 # 🛡 DevShield · कवच-यन्त्र
 
-**Privacy · Thermal · Network Intelligence — for Windows developers**
+**Privacy · Thermal · Network · AI-agent control — the owner decides what runs and what leaves the machine**
 
-DevShield lives in your system tray and does three things no other tool combines:
-- **Thermal profiles** — Silent Summer, Gaming Gear, Dev Mode with real before/after sensor verification
-- **Privacy hardening** — Telemetry sinkhole, registry tweaks, Tor kill-switch
-- **Network watchdog** — Background per-process monitor, alerts on unexpected connections
+DevShield aims to keep a developer's machine under its owner's control: it watches for AI agents (including undocumented, rogue ones), controls what may leave the machine, blocks telemetry and manages thermal profiles.
 
-Built in Go. Scripts in PowerShell 7. Sensor data via LibreHardwareMonitor.  
-Bilingual interface: **English + Sanskrit (द्विभाषिक)**.
+There are two variants, at different stages:
+- **Linux**: a root daemon plus a CLI (`devshield …`), written in Go. This is where development is focused now. See [docs/USER_MANUAL.md](docs/USER_MANUAL.md) section 2b.
+- **Windows**: a tray app (Go) that runs PowerShell 7 scripts, with sensors via LibreHardwareMonitor and a bilingual interface (**English + Sanskrit, द्विभाषिक**). **Several of its core features are known to be broken** (below). It will be fixed after Linux.
+
+## What works today (honest status)
+
+| Feature | Linux | Windows |
+|---|---|---|
+| AI agent detection (Agent Watch) | ✅ unit-tested; live-tested in namespaces | ⚠ compiles, **never run on Windows** |
+| Block one agent's network / lockdown (tunnel, Tor, chosen users) | ✅ live-tested against the real kernel in namespaces (`test/linux-live/`); not yet with a real VPN/Tor or under systemd | — not implemented |
+| Telemetry sinkhole (hosts file) | ✅ unit-tested; restore checked live on a simulated tree | ⚠ script exists, not tested on Windows |
+| LAN privacy (LLMNR/mDNS, MAC randomisation) | ⚠ tested on a simulated system only | ⚠ in `tor_hardening.ps1`, not tested |
+| Thermal profiles | ⚠ tested on simulated kernel layouts, **not on real hardware** | ⚠ scripts exist, not tested on Windows |
+| Network monitor | ✅ live-tested in a namespace (TCP only) | ❌ crashes in its main loop; unknown-process alerts never fire (C5) |
+| Undo everything | ✅ `devshield restore-all`, live-tested on a simulated tree | ❌ rollback restores nothing and still reports success (C4) |
+| Tor kill switch | ✅ via `lockdown on --tor` (see above) | ❌ creates only *allow* rules, so it blocks nothing (C6) |
+| One-time admin setup | — (systemd unit, not yet run under systemd) | ❌ task registration always fails (C1), first run can't run unattended (C2), tray actions stop at a prompt (C3) |
+
+C1–C8 refer to [docs/REVIEW_NOTES_2026-10-20.md](docs/REVIEW_NOTES_2026-10-20.md). DevShield makes **no network connection on its own**: update checks happen only when you click "Check for updates".
 
 > ⚠️ Experimental / intermediate-stage warning
 > DevShield is currently in an intermediate development stage and has not yet been validated through rigorous, broad real-world testing. The project may contain bugs, incomplete features, or behavior that could affect system stability, privacy settings, or network access. Anyone installing, downloading, or forking this repository should treat it as experimental software and use it at their own risk. We strongly recommend testing it on a disposable or non-critical Windows system, creating a restore point or backup first, and reviewing the scripts before execution.
@@ -43,7 +57,7 @@ Download `devshield.exe` from [Releases](../../releases).
 
 ---
 
-## What it does
+## What it does (Windows tray: read the status table above first)
 
 ### System tray
 Click the shield icon in your taskbar. One click applies any profile.
@@ -73,7 +87,7 @@ Click the shield icon in your taskbar. One click applies any profile.
 | 🎮 Gaming Gear | Aggressive | Unlimited | Turbo | Games, benchmarks, rendering |
 | 💻 Dev Mode | Efficient | 90% cap | Balanced | Coding, compiling, Docker |
 
-Every profile reads sensor data **before and after** applying, shows you the delta, and verifies the change actually worked. If it fails midway, it automatically rolls back.
+Every profile is designed to read sensor data **before and after** applying and show you the delta. None of this has been tested on a real Windows machine yet, and automatic rollback depends on `rollback.ps1`, which is currently broken (C4).
 
 ### Hardware dashboard
 ```powershell
@@ -97,7 +111,7 @@ pwsh -File scripts\hardening\privacy_enforcer.ps1 -Rollback
 ```
 
 ### Network guardian
-Monitors all TCP connections, categorises traffic, alerts on telemetry or unknown processes.
+Designed to monitor TCP connections, categorise traffic and alert on telemetry or unknown processes. **Currently broken:** the main loop crashes on the first unknown process, so those alerts never fire, and the tray's Stop cannot stop it (C5).
 
 ```powershell
 pwsh -File scripts\monitor\network_guardian.ps1 -Start    # start background job
@@ -106,8 +120,8 @@ pwsh -File scripts\monitor\network_guardian.ps1 -Alerts   # view recent alerts
 pwsh -File scripts\monitor\network_guardian.ps1 -Stop     # stop
 ```
 
-### Rollback — undo anything
-Every destructive action saves a backup. Rollback restores your exact pre-DevShield state.
+### Rollback
+Every destructive action saves a backup. **Currently broken:** rollback reads the backup wrongly, restores nothing and still reports success (C4). Until it's fixed, make a Windows restore point before using DevShield.
 
 ```powershell
 pwsh -File scripts\hardening\rollback.ps1          # interactive list
@@ -132,12 +146,7 @@ devshield-lang toggle   # cycle to next
 
 ## First run
 
-On first launch, DevShield automatically:
-
-1. Scans your hardware (CPU, GPU, motherboard, RAM, storage, NICs)
-2. Saves a hardware profile to `~/.devshield/hardware_profile.json`
-3. Registers admin tasks in Task Scheduler (one UAC prompt, never again)
-4. Offers to download LibreHardwareMonitor for full sensor access
+The intended first run scans your hardware, saves a hardware profile to `~/.devshield/hardware_profile.json`, registers admin tasks in Task Scheduler (one UAC prompt) and offers to download LibreHardwareMonitor. **Today this does not work:** the tray never starts first-run setup, task registration always fails, and first run stops at an interactive prompt (C1, C2).
 
 ---
 
@@ -202,9 +211,11 @@ PS scripts write events to `~/.devshield/events/`. The Go tray app watches that 
 ## Building from source
 
 ### Requirements
-- Go 1.22+
-- TDM-GCC (for CGO): https://jmeubank.github.io/tdm-gcc/
-- PowerShell 7
+- Go as named in `go.mod` (it fetches the patched toolchain itself)
+- PowerShell 7 (Windows variant only)
+- `build.bat` currently insists on GCC (TDM-GCC) because it sets CGO. That isn't actually needed: the Windows build compiles with `CGO_ENABLED=0` (checked by cross-compiling). This will be simplified when the Windows variant is fixed.
+
+On Linux: `go build -o devshield .`, then follow the install steps in the user manual (section 2b). The network controls need `nftables`.
 
 ```powershell
 # Clone
@@ -250,8 +261,7 @@ devshield/
 
 ## Roadmap
 
-- **v0.5** WinGet catalog submission (zero SmartScreen), Scoop bucket, auto-update checker, JSON profile export ("dotfiles for security")
-- **v1.0** Rewrite core in Rust for memory-safe, zero-overhead binary. Microsoft Trusted Signing ($9.99/mo) for mainstream users.
+See [docs/ROADMAP_LINUX_FIRST_AND_X402.md](docs/ROADMAP_LINUX_FIRST_AND_X402.md): Linux first (daemon, tray, .deb/.rpm), then fix and test the Windows variant (C1–C8), then macOS.
 
 ---
 

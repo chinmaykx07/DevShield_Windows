@@ -439,7 +439,7 @@ func TestLaunchTarget(t *testing.T) {
 		{ProcInfo{Name: "Cursor.exe", Cmdline: `Cursor.exe --type=renderer`}, ""},
 	}
 	for _, tc := range cases {
-		if got := launchTarget(tc.p); got != tc.want {
+		if got, _ := launchTarget(tc.p); got != tc.want {
 			t.Errorf("launchTarget(%q) = %q, want %q", tc.p.Cmdline, got, tc.want)
 		}
 	}
@@ -533,12 +533,169 @@ func TestShellInlineCommandIsNotTheAgent(t *testing.T) {
 		{"bash", `bash -lc "fake-rogue-agent --run"`, false},
 		{"cmd.exe", `cmd.exe /c fake-rogue-agent.exe`, false},
 		{"pwsh", `pwsh -NoProfile -Command "fake-rogue-agent"`, false},
-		{"bash", `bash /opt/fake-rogue-agent/run.sh`, true},    // a script file is what the shell IS
-		{"python3", `python3 agent.py fake-rogue-agent`, true}, // the real agent process
+		{"bash", `bash /opt/fake-rogue-agent/run.sh`, true},         // a script file is what the shell IS
+		{"python3", `python3 agent.py fake-rogue-agent`, false},     // an argument, not what runs
+		{"python3", `python3 /opt/fake-rogue-agent/agent.py`, true}, // the script it runs
 	} {
 		got := cat.Match(ProcInfo{Name: tc.name, Cmdline: tc.cmdline}) != nil
 		if got != tc.want {
 			t.Errorf("%s %q matched=%v, want %v", tc.name, tc.cmdline, got, tc.want)
 		}
+	}
+}
+
+// ── Regressions from the 2026-10-21 audit: each case was reproduced on the
+// previous code before being fixed.
+
+func auditSnap(p ProcInfo, b *ProcBehavior, listen []int, remote []string, auto map[string]string) Snapshot {
+	if b == nil {
+		b = &ProcBehavior{}
+	}
+	s := Snapshot{Procs: []ProcInfo{{PID: 1, Name: "systemd"}, p}, ListenPorts: map[int32][]int{},
+		RemoteEndpoints: map[int32][]string{}, Behavior: map[int32]*ProcBehavior{p.PID: b}, Autostart: auto}
+	if listen != nil {
+		s.ListenPorts[p.PID] = listen
+	}
+	if remote != nil {
+		s.RemoteEndpoints[p.PID] = remote
+	}
+	return s
+}
+
+func TestAuditOrdinaryProgramsAreNotAgents(t *testing.T) {
+	c := mustCatalog(t)
+	for _, tc := range []struct {
+		name string
+		snap Snapshot
+	}{
+		{"python http.server on 8080", auditSnap(ProcInfo{PID: 10, PPID: 1, Name: "python3", Exe: "/usr/bin/python3.12", Cmdline: "python3 -m http.server 8080"}, nil, []int{8080}, nil, nil)},
+		{"go run web app on 8080", auditSnap(ProcInfo{PID: 10, PPID: 1, Name: "main", Exe: "/tmp/go-build1/b001/exe/main", Cmdline: "/tmp/go-build1/b001/exe/main"}, nil, []int{8080}, nil, nil)},
+		{"IDE calling localhost:8080 + git", auditSnap(ProcInfo{PID: 10, PPID: 1, Name: "java", Exe: "/usr/bin/java", Cmdline: "java -jar idea.jar"}, &ProcBehavior{ToolSpawns: []string{"git"}}, nil, []string{"127.0.0.1:8080"}, nil)},
+		{"PyTorch training with data-loader workers", auditSnap(ProcInfo{PID: 10, PPID: 1, Name: "python3", Exe: "/usr/bin/python3.12", Cmdline: "python3 train.py"}, &ProcBehavior{Modules: []string{"libtorch_cpu.so"}, ToolSpawns: []string{"python3", "python3", "python3", "python3"}}, nil, nil, nil)},
+		{"nodemon in an 'agentic' project folder", auditSnap(ProcInfo{PID: 10, PPID: 1, Name: "node", Exe: "/usr/bin/node", Cmdline: "node /home/u/agentic-rag/node_modules/.bin/nodemon index.js"}, &ProcBehavior{ToolSpawns: []string{"sh", "sh", "sh"}}, nil, nil, nil)},
+		{"npm installing the MCP SDK", auditSnap(ProcInfo{PID: 10, PPID: 1, Name: "npm", Exe: "/usr/bin/node", Cmdline: "npm install @modelcontextprotocol/sdk"}, nil, nil, nil, nil)},
+		{"language server in an *-mcp folder", auditSnap(ProcInfo{PID: 10, PPID: 1, Name: "node", Exe: "/usr/bin/node", Cmdline: "node /home/u/src/weather-mcp/node_modules/.bin/typescript-language-server --stdio"}, nil, nil, nil, nil)},
+		{"VS Code opening a folder named opencode", auditSnap(ProcInfo{PID: 10, PPID: 1, Name: "code", Exe: "/usr/share/code/code", Cmdline: "/usr/share/code/code /home/u/src/opencode"}, nil, nil, nil, nil)},
+		{"grep for openclaw", auditSnap(ProcInfo{PID: 10, PPID: 1, Name: "rg", Exe: "/usr/bin/rg", Cmdline: "rg -i openclaw docs/"}, nil, nil, nil, nil)},
+		{"tail of an mcp-server log", auditSnap(ProcInfo{PID: 10, PPID: 1, Name: "tail", Exe: "/usr/bin/tail", Cmdline: "tail -f /var/log/mcp-server.log"}, nil, nil, nil, nil)},
+		{"Copilot language server in Neovim", auditSnap(ProcInfo{PID: 10, PPID: 1, Name: "node", Exe: "/usr/bin/node", Cmdline: "node /home/u/.local/share/nvim/lazy/copilot.lua/copilot/js/node_modules/@github/copilot-language-server/dist/language-server.js --stdio"}, nil, nil, nil, nil)},
+	} {
+		if dets := c.Classify(tc.snap, nil); len(dets) > 0 {
+			t.Errorf("%s: reported as %q (score %d, reasons %v)", tc.name, dets[0].Name, dets[0].AgentScore, dets[0].Reasons)
+		}
+	}
+}
+
+func TestAuditRealAgentsStillDetected(t *testing.T) {
+	c := mustCatalog(t)
+	llm := map[string]string{"1.2.3.4": "api.openai.com"}
+	for _, tc := range []struct {
+		name, want string
+		snap       Snapshot
+	}{
+		{"llama-server", "llama.cpp server", auditSnap(ProcInfo{PID: 10, PPID: 1, Name: "llama-server", Exe: "/usr/local/bin/llama-server", Cmdline: "llama-server -m model.gguf"}, nil, []int{8080}, nil, nil)},
+		{"Ollama on its own port", "Ollama", auditSnap(ProcInfo{PID: 10, PPID: 1, Name: "ollama", Exe: "/usr/local/bin/ollama", Cmdline: "ollama serve"}, nil, []int{11434}, nil, nil)},
+		{"unknown program on Ollama's port", "Unknown AI agent (srv)", auditSnap(ProcInfo{PID: 10, PPID: 1, Name: "srv", Exe: "/opt/srv"}, nil, []int{11434}, nil, nil)},
+		{"Claude Code via node", "Claude Code", auditSnap(ProcInfo{PID: 10, PPID: 1, Name: "node", Exe: "/usr/bin/node", Cmdline: "node /usr/lib/node_modules/@anthropic-ai/claude-code/cli.js"}, nil, nil, nil, nil)},
+		{"MCP server via npx", "MCP server: server-filesystem", auditSnap(ProcInfo{PID: 10, PPID: 1, Name: "npx", Exe: "/usr/bin/node", Cmdline: "npx -y @modelcontextprotocol/server-filesystem /home"}, nil, nil, nil, nil)},
+		{"MCP server via uvx", "MCP server: mcp-server-fetch", auditSnap(ProcInfo{PID: 10, PPID: 1, Name: "uvx", Exe: "/home/u/.local/bin/uvx", Cmdline: "uvx mcp-server-fetch"}, nil, nil, nil, nil)},
+		{"aider via python -m", "Aider", auditSnap(ProcInfo{PID: 10, PPID: 1, Name: "python3", Exe: "/usr/bin/python3", Cmdline: "python3 -m aider --model x"}, nil, nil, nil, nil)},
+		{"unnamed agent: LLM API + tools", "Unknown AI agent (x)", auditSnap(ProcInfo{PID: 10, PPID: 1, Name: "x", Exe: "/home/u/.local/bin/x", Cmdline: "x"}, &ProcBehavior{ToolSpawns: []string{"bash", "git", "curl"}}, nil, []string{"1.2.3.4:443"}, nil)},
+	} {
+		dets := c.Classify(tc.snap, llm)
+		if len(dets) == 0 || dets[0].Name != tc.want {
+			t.Errorf("%s: got %+v, want %q", tc.name, dets, tc.want)
+		}
+	}
+}
+
+func TestAuditVerdicts(t *testing.T) {
+	c := mustCatalog(t)
+	// Ollama installed as a systemd service: after the owner sanctions it,
+	// it is simply sanctioned, not "risky" forever.
+	d := c.Classify(auditSnap(ProcInfo{PID: 10, PPID: 1, Name: "ollama", Exe: "/usr/local/bin/ollama", Cmdline: "/usr/local/bin/ollama serve"}, nil, []int{11434}, nil,
+		map[string]string{"/usr/local/bin/ollama": "systemd unit (ollama.service)"}), nil)
+	if v, r := AgentVerdict(AgentSanctioned, d[0].Risks); v != VerdictSanctioned {
+		t.Errorf("sanctioned Ollama service: %s %v", v, r)
+	}
+	// One "node app.js" service must not mark every node program auto-started.
+	d = c.Classify(auditSnap(ProcInfo{PID: 10, PPID: 1, Name: "node", Exe: "/usr/bin/node", Cmdline: "node /usr/lib/node_modules/@anthropic-ai/claude-code/cli.js"}, nil, nil, nil,
+		map[string]string{autostartKey("/usr/bin/node", "/usr/bin/node /srv/app.js"): "systemd unit (myapp.service)"}), nil)
+	if len(d[0].Risks) != 0 {
+		t.Errorf("node service marked Claude Code as auto-started: %v", d[0].Risks)
+	}
+	// A script agent run from Downloads/tmp is flagged like an executable.
+	d = c.Classify(auditSnap(ProcInfo{PID: 10, PPID: 1, Name: "python3", Exe: "/usr/bin/python3", Cmdline: "python3 /tmp/x/agent.py"},
+		&ProcBehavior{ToolSpawns: []string{"bash", "git", "curl"}}, nil, []string{"1.2.3.4:443"}, nil), map[string]string{"1.2.3.4": "api.openai.com"})
+	if len(d) == 0 || !strings.Contains(strings.Join(d[0].Risks, ";"), "unusual location (/tmp/x/agent.py)") {
+		t.Errorf("script in /tmp not flagged: %+v", d)
+	}
+}
+
+func TestAuditFingerprintsSeparateDifferentCode(t *testing.T) {
+	c := mustCatalog(t)
+	fp := func(p ProcInfo) string {
+		d := c.Classify(auditSnap(p, &ProcBehavior{ToolSpawns: []string{"bash", "git", "curl"}}, nil, []string{"1.2.3.4:443"}, nil), map[string]string{"1.2.3.4": "api.openai.com"})
+		if len(d) == 0 {
+			t.Fatalf("%q not detected", p.Cmdline)
+		}
+		return AgentFingerprint(d[0])
+	}
+	for _, pair := range [][2]ProcInfo{
+		{{PID: 10, Name: "node", Exe: "/usr/bin/node", Cmdline: "node /usr/lib/node_modules/@anthropic-ai/claude-code/cli.js"},
+			{PID: 10, Name: "node", Exe: "/usr/bin/node", Cmdline: "node --require=/tmp/evil.js /usr/lib/node_modules/@anthropic-ai/claude-code/cli.js"}},
+		{{PID: 10, Name: "uvx", Exe: "/u/uvx", Cmdline: "uvx mcp-server-fetch"}, {PID: 10, Name: "uvx", Exe: "/u/uvx", Cmdline: "uvx mcp-server-git"}},
+		{{PID: 10, Name: "java", Exe: "/usr/bin/java", Cmdline: "java -jar /opt/a/agent.jar"}, {PID: 10, Name: "java", Exe: "/usr/bin/java", Cmdline: "java -jar /tmp/evil.jar"}},
+		{{PID: 10, Name: "python3", Exe: "/usr/bin/python3", Cmdline: "python3 -X utf8 /opt/agent.py"}, {PID: 10, Name: "python3", Exe: "/usr/bin/python3", Cmdline: "python3 -X utf8 /srv/evil.py"}},
+		{{PID: 10, Name: "python3", Exe: "/usr/bin/python3", Cmdline: "python3 agent.py", Cwd: "/home/a/proj1"}, {PID: 10, Name: "python3", Exe: "/usr/bin/python3", Cmdline: "python3 agent.py", Cwd: "/home/a/proj2"}},
+	} {
+		if a, b := fp(pair[0]), fp(pair[1]); a == b {
+			t.Errorf("different code shares a fingerprint: %q", a)
+		}
+	}
+}
+
+func TestAuditRedaction(t *testing.T) {
+	for _, s := range []string{"aider --api-key gsk_abcdefghijkl", `curl -H "Authorization: Bearer abcdefghijklmnop" x`,
+		"x --hf hf_abcdefghijklmnop", "x github_pat_11ABCDEFGHIJ", "x --openai-api-key=sk-proj-abcdefghij"} {
+		out := redactSecrets(s)
+		for _, secret := range []string{"gsk_abcdefghijkl", "abcdefghijklmnop", "hf_abcdefghijklmnop", "github_pat_11ABCDEFGHIJ", "sk-proj-abcdefghij"} {
+			if strings.Contains(s, secret) && strings.Contains(out, secret) {
+				t.Errorf("%q not redacted: %q", secret, out)
+			}
+		}
+	}
+}
+
+// A human typing in an IDE's built-in terminal (interactive shell) is not
+// the IDE's agent loop; an agent's non-interactive "bash -c" still is.
+func TestInteractiveShellStopsCredit(t *testing.T) {
+	isTool := func(n string) bool { return n == "whoami" || n == "bash" }
+	isShell := func(n string) bool { return n == "bash" }
+	tr := newSpawnTracker(time.Minute)
+	t0 := time.Now()
+	tr.observe([]fastProc{{PID: 10, PPID: 1, Name: "cursor"}, {PID: 11, PPID: 10, Name: "bash", Interactive: true},
+		{PID: 20, PPID: 1, Name: "agent"}, {PID: 21, PPID: 20, Name: "bash"}}, t0, isTool, isShell)
+	tr.observe([]fastProc{{PID: 10, PPID: 1, Name: "cursor"}, {PID: 11, PPID: 10, Name: "bash", Interactive: true},
+		{PID: 12, PPID: 11, Name: "whoami"}, {PID: 20, PPID: 1, Name: "agent"}, {PID: 21, PPID: 20, Name: "bash"},
+		{PID: 22, PPID: 21, Name: "whoami"}}, t0.Add(time.Second), isTool, isShell)
+	if got := tr.recent(10); len(got) != 0 {
+		t.Errorf("IDE credited with a human's terminal commands: %v", got)
+	}
+	if got := tr.recent(20); len(got) != 1 {
+		t.Errorf("agent's non-interactive shell command not credited: %v", got)
+	}
+}
+
+// fork, pause, exec: the child first carries its parent's name.
+func TestRenamedChildIsCounted(t *testing.T) {
+	isTool := func(n string) bool { return n == "id" }
+	tr := newSpawnTracker(time.Minute)
+	t0 := time.Now()
+	tr.observe([]fastProc{{PID: 20, PPID: 1, Name: "agent"}}, t0, isTool, func(string) bool { return false })
+	tr.observe([]fastProc{{PID: 20, PPID: 1, Name: "agent"}, {PID: 21, PPID: 20, Name: "agent"}}, t0.Add(time.Second), isTool, func(string) bool { return false })
+	tr.observe([]fastProc{{PID: 20, PPID: 1, Name: "agent"}, {PID: 21, PPID: 20, Name: "id"}}, t0.Add(2*time.Second), isTool, func(string) bool { return false })
+	if got := tr.recent(20); len(got) != 1 || got[0] != "id" {
+		t.Errorf("exec'd tool hidden behind its parent's name: %v", got)
 	}
 }

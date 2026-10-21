@@ -74,24 +74,77 @@ type Log struct {
 
 func headPath(path string) string { return path + ".head" }
 
-// Open opens (or creates) the log at path and verifies it. When the chain
-// is broken it still returns a usable Log — appending continues from the
-// last stored record — together with a *ChainError, so the caller can
-// record the tampering instead of going blind.
-func Open(path string) (*Log, error) {
+// OpenInfo describes what Open found in an existing log.
+type OpenInfo struct {
+	// Broken is set when the chain did not verify. The broken file (and
+	// its head) were moved aside to Aside as evidence and a new log was
+	// started, so records written from now on verify again.
+	Broken *ChainError
+	Aside  string
+	// TornBytes > 0: an incomplete final record (a write cut short by a
+	// crash or power loss, never confirmed by the head) was removed.
+	TornBytes int
+	// Last is the last valid record before this run, if any.
+	Last *Record
+}
+
+// Open opens (or creates) the log at path and verifies it.
+func Open(path string) (*Log, OpenInfo, error) {
+	var info OpenInfo
+	torn, err := trimTornTail(path)
+	if err != nil {
+		return nil, info, err
+	}
+	info.TornBytes = torn
 	n, last, verr := verify(path)
-	if verr != nil && !errors.As(verr, new(*ChainError)) {
-		return nil, verr // I/O error, not tampering
+	var chainErr *ChainError
+	if verr != nil && !errors.As(verr, &chainErr) {
+		return nil, info, verr // I/O error, not tampering
+	}
+	if n > 0 {
+		info.Last = &last
+	}
+	if chainErr != nil {
+		info.Broken = chainErr
+		info.Aside = fmt.Sprintf("%s.broken-%d", path, time.Now().Unix())
+		if err := os.Rename(path, info.Aside); err != nil && !os.IsNotExist(err) {
+			return nil, info, err
+		}
+		os.Rename(headPath(path), info.Aside+".head")
+		n = 0
 	}
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
 	if err != nil {
-		return nil, err
+		return nil, info, err
 	}
 	l := &Log{path: path, f: f, seq: 0, head: genesis}
 	if n > 0 {
 		l.seq, l.head = last.Seq, last.Hash
 	}
-	return l, verr
+	return l, info, nil
+}
+
+// trimTornTail removes an incomplete final line, but only one the head
+// never confirmed: records are written before the head, so a line beyond
+// the head's count was never acknowledged. Anything else is left for
+// verify to report.
+func trimTornTail(path string) (int, error) {
+	data, err := os.ReadFile(path)
+	if err != nil || len(data) == 0 || data[len(data)-1] == '\n' {
+		if os.IsNotExist(err) {
+			err = nil
+		}
+		return 0, err
+	}
+	cut := strings.LastIndexByte(string(data), '\n') + 1
+	complete := strings.Count(string(data[:cut]), "\n")
+	if seq, _, ok := readHead(path); ok && seq > uint64(complete) {
+		return 0, nil // the head vouches for this line: corruption, not a crash
+	}
+	if err := os.Truncate(path, int64(cut)); err != nil {
+		return 0, err
+	}
+	return len(data) - cut, nil
 }
 
 // Append writes one event and makes it durable before returning.
@@ -119,10 +172,11 @@ func (l *Log) Append(action, detail, status, source string) (Record, error) {
 	if err := l.f.Sync(); err != nil {
 		return Record{}, err
 	}
-	if err := writeHead(l.path, r.Seq, r.Hash); err != nil {
-		return Record{}, err
-	}
+	// The record is durable: advance even if the head update fails (the
+	// next append rewrites the head; a stale head only weakens truncation
+	// detection until then, it never makes a valid log look tampered).
 	l.seq, l.head = r.Seq, r.Hash
+	writeHead(l.path, r.Seq, r.Hash)
 	return r, nil
 }
 
@@ -164,20 +218,27 @@ func Verify(path string) (int, error) {
 
 func verify(path string) (int, Record, error) {
 	var last Record
-	f, err := os.Open(path)
+	// The head is read FIRST: records are written before the head, so
+	// every record the head vouches for is complete by now. Reading the
+	// file first and the head second races with a concurrent append.
+	hseq, hhash, hok := readHead(path)
+	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
-		if seq, _, ok := readHead(path); ok && seq > 0 {
-			return 0, last, &ChainError{Reason: fmt.Sprintf("log file missing but head says %d records", seq)}
+		if hok && hseq > 0 {
+			return 0, last, &ChainError{Reason: fmt.Sprintf("log file missing but head says %d records", hseq)}
 		}
 		return 0, last, nil
 	}
 	if err != nil {
 		return 0, last, err
 	}
-	defer f.Close()
+	if i := strings.LastIndexByte(string(data), '\n'); i+1 < len(data) {
+		data = data[:i+1] // an append in progress (or a torn write beyond the head)
+	}
 
 	prev, n := genesis, 0
-	sc := bufio.NewScanner(f)
+	var atHead *Record
+	sc := bufio.NewScanner(strings.NewReader(string(data)))
 	sc.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	for sc.Scan() {
 		lineNo := n + 1
@@ -194,17 +255,20 @@ func verify(path string) (int, Record, error) {
 			return n, last, &ChainError{Line: lineNo, Seq: uint64(lineNo), Reason: "content does not match its hash (record edited)"}
 		}
 		prev, last, n = r.Hash, r, n+1
+		if hok && r.Seq == hseq {
+			rec := r
+			atHead = &rec
+		}
 	}
 	if err := sc.Err(); err != nil {
 		return n, last, err
 	}
-
-	if seq, hash, ok := readHead(path); ok {
-		if seq > uint64(n) {
-			return n, last, &ChainError{Reason: fmt.Sprintf("log truncated: head says %d records, file has %d", seq, n)}
+	if hok {
+		if hseq > uint64(n) {
+			return n, last, &ChainError{Reason: fmt.Sprintf("log truncated: head says %d records, file has %d", hseq, n)}
 		}
-		if seq == uint64(n) && n > 0 && hash != last.Hash {
-			return n, last, &ChainError{Reason: "last record does not match the head (log rewritten)"}
+		if atHead != nil && atHead.Hash != hhash {
+			return n, last, &ChainError{Reason: "the record the head points to does not match it (log rewritten)"}
 		}
 	}
 	return n, last, nil

@@ -158,7 +158,12 @@ type Handler func(peer Peer, req Request) Response
 var ErrUnsupported = errors.New("the DevShield daemon is not available on this platform yet")
 
 // Serve accepts connections until the listener is closed.
+// maxConcurrent bounds how many requests are served at once, so a local
+// process opening many idle connections cannot exhaust the daemon.
+const maxConcurrent = 32
+
 func Serve(l net.Listener, h Handler) error {
+	slots := make(chan struct{}, maxConcurrent)
 	for {
 		conn, err := l.Accept()
 		if err != nil {
@@ -167,7 +172,15 @@ func Serve(l net.Listener, h Handler) error {
 			}
 			return err
 		}
-		go handle(conn, h)
+		select {
+		case slots <- struct{}{}:
+			go func() {
+				defer func() { <-slots }()
+				handle(conn, h)
+			}()
+		default:
+			conn.Close() // busy: refuse rather than queue without limit
+		}
 	}
 }
 

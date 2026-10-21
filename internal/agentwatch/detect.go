@@ -195,7 +195,8 @@ type ProcInfo struct {
 	Exe     string // full path, may be empty without permission
 	Cmdline string
 	User    string
-	Start   int64 // creation time (ms); with PID, identifies the process across PID reuse
+	Start   int64  // creation time (ms); with PID, identifies the process across PID reuse
+	Cwd     string // working directory (generic runtimes only), to resolve relative scripts
 }
 
 // ProcBehavior holds the expensive, OS-specific observations about one
@@ -232,7 +233,8 @@ type Detection struct {
 	Kind       string
 	Known      bool // identity matched the catalog (a label, not a verdict)
 	PID        int32
-	Start      int64 // process creation time (ms), see ProcInfo.Start
+	Start      int64  // process creation time (ms), see ProcInfo.Start
+	Script     string // the script/jar a runtime runs, hashed to notice changes
 	Exe        string
 	Cmdline    string
 	User       string
@@ -247,6 +249,9 @@ type Detection struct {
 // reaches it on its own.
 const UnknownAgentThreshold = 3
 
+// riskAutostart starts the auto-start indicator (cleared by a sanction).
+const riskAutostart = "registered to start automatically"
+
 // RiskUndocumented is the rogue indicator for an agent that matches no
 // catalog entry. It is dropped once the user sanctions that agent.
 const RiskUndocumented = "undocumented agent — not in any catalog"
@@ -254,12 +259,13 @@ const RiskUndocumented = "undocumented agent — not in any catalog"
 // Match returns the first catalog signature that matches p, or nil.
 func (c *AgentCatalog) Match(p ProcInfo) *AgentSignature {
 	name := strings.ToLower(p.Name)
-	cmdline := p.Cmdline
+	// Patterns see only what the program IS, never its other arguments.
+	cmdline := identity(p)
 	if c.shells[name] {
 		// A shell's inline command is text it runs, not what it is:
 		// "bash -c 'cat claude-code-notes'" is not Claude Code. The real
 		// agent it launches is matched as its own process.
-		cmdline = shellIdentity(name, cmdline)
+		cmdline = shellIdentity(name, p.Cmdline)
 	}
 	for i := range c.Agents {
 		a := &c.Agents[i]
@@ -307,9 +313,9 @@ func (c *AgentCatalog) Classify(s Snapshot, llmIPs map[string]string) []Detectio
 			continue
 		}
 
-		target := launchTarget(p)
+		target, script := launchTarget(p)
 		d := Detection{
-			PID: p.PID, Start: p.Start, Exe: p.Exe, Cmdline: p.Cmdline, User: p.User, Target: target,
+			PID: p.PID, Start: p.Start, Exe: p.Exe, Cmdline: p.Cmdline, User: p.User, Target: target, Script: script,
 			AgentScore: score, Reasons: reasons,
 		}
 		if sig != nil {
@@ -342,9 +348,15 @@ func (c *AgentCatalog) agentScore(p ProcInfo, s Snapshot, b *ProcBehavior, llmIP
 	var reasons []string
 	add := func(n int, why string) { score += n; reasons = append(reasons, why) }
 
+	// A distinctive model port (Ollama's 11434) is strong evidence; a
+	// port every web framework also uses (8080, 1234, 1337) is barely any.
 	for _, port := range s.ListenPorts[p.PID] {
 		if owner, ok := c.llmPorts[port]; ok {
-			add(3, fmt.Sprintf("serves a model on local LLM port %d (usually %s)", port, owner))
+			if commonPorts[port] {
+				add(1, fmt.Sprintf("listens on port %d (also used by %s, and by many web servers)", port, owner))
+			} else {
+				add(3, fmt.Sprintf("serves a model on local LLM port %d (usually %s)", port, owner))
+			}
 			break
 		}
 	}
@@ -365,7 +377,11 @@ func (c *AgentCatalog) agentScore(p ProcInfo, s Snapshot, b *ProcBehavior, llmIP
 		add(2, "connected to LLM API ("+apiHit+")")
 	}
 	if localHit != 0 {
-		add(2, fmt.Sprintf("talks to a local model server on port %d", localHit))
+		if commonPorts[localHit] {
+			add(1, fmt.Sprintf("talks to local port %d (a model server port, but common)", localHit))
+		} else {
+			add(2, fmt.Sprintf("talks to a local model server on port %d", localHit))
+		}
 	}
 
 	if len(b.EnvHits) > 0 {
@@ -389,17 +405,17 @@ func (c *AgentCatalog) agentScore(p ProcInfo, s Snapshot, b *ProcBehavior, llmIP
 	// Shells and terminals launching tools is just a human typing.
 	name := strings.ToLower(p.Name)
 	if !c.shells[name] && !c.termHosts[name] {
-		switch n := len(b.ToolSpawns); {
+		switch n := len(otherPrograms(b.ToolSpawns, name)); {
 		case n >= 3:
-			add(2, fmt.Sprintf("ran %d shells/tools recently (%s)", n, summarizeNames(b.ToolSpawns)))
+			add(2, fmt.Sprintf("ran %d shells/tools recently (%s)", n, summarizeNames(otherPrograms(b.ToolSpawns, name))))
 		case n > 0:
-			add(1, fmt.Sprintf("ran %s", summarizeNames(b.ToolSpawns)))
+			add(1, fmt.Sprintf("ran %s", summarizeNames(otherPrograms(b.ToolSpawns, name))))
 		}
 	}
 
 	// Weak on purpose: trivially added or removed by an author.
 	if c.keywordRe != nil {
-		if kw := c.keywordRe.FindString(p.Cmdline); kw != "" {
+		if kw := c.keywordRe.FindString(identityNames(p)); kw != "" {
 			add(1, "command line mentions "+strings.ToLower(kw))
 		}
 	}
@@ -413,9 +429,17 @@ func (c *AgentCatalog) rogueIndicators(p ProcInfo, s Snapshot, b *ProcBehavior, 
 	if undocumented {
 		risks = append(risks, RiskUndocumented)
 	}
-	for _, re := range c.unusualRe {
-		if p.Exe != "" && re.MatchString(p.Exe) {
-			risks = append(risks, "runs from an unusual location ("+p.Exe+")")
+	_, script := launchTarget(p)
+	for _, where := range []string{p.Exe, script} {
+		found := false
+		for _, re := range c.unusualRe {
+			if where != "" && re.MatchString(where) {
+				risks = append(risks, "runs from an unusual location ("+where+")")
+				found = true
+				break
+			}
+		}
+		if found {
 			break
 		}
 	}
@@ -433,8 +457,8 @@ func (c *AgentCatalog) rogueIndicators(p ProcInfo, s Snapshot, b *ProcBehavior, 
 	if len(sens) > 0 {
 		risks = append(risks, "launched recon/persistence/credential tools ("+strings.Join(sens, ", ")+")")
 	}
-	if where, ok := s.Autostart[strings.ToLower(p.Exe)]; ok && p.Exe != "" {
-		risks = append(risks, "registered to start automatically ("+where+")")
+	if where, ok := s.Autostart[autostartKey(p.Exe, p.Cmdline)]; ok && p.Exe != "" {
+		risks = append(risks, riskAutostart+" ("+where+")")
 	}
 	if p.PPID != 0 && !alive[p.PPID] && len(b.ToolSpawns) > 0 {
 		risks = append(risks, "running detached — its parent process is gone")
@@ -458,7 +482,10 @@ func AgentVerdict(status string, risks []string) (string, []string) {
 	if status == AgentSanctioned {
 		var remaining []string
 		for _, r := range risks {
-			if r != RiskUndocumented {
+			// The owner's approval covers what the agent is and how it is
+			// installed to start; behaviour (tools it runs, flags, where it
+			// runs from) still counts.
+			if r != RiskUndocumented && !strings.HasPrefix(r, riskAutostart) {
 				remaining = append(remaining, r)
 			}
 		}
@@ -516,41 +543,170 @@ func splitEndpoint(ep string) (string, int) {
 	return strings.Trim(ep[:i], "[]"), port
 }
 
+// commonPorts are also used by countless ordinary programs.
+var commonPorts = map[int]bool{80: true, 443: true, 1234: true, 1337: true, 3000: true, 5000: true, 8000: true, 8080: true, 8443: true, 8888: true}
+
+// otherPrograms drops children with the program's own name: worker
+// processes it forks (PyTorch data loaders, multiprocessing pools) are not
+// an agent launching tools.
+func otherPrograms(spawns []string, self string) []string {
+	self = strings.TrimSuffix(self, ".exe")
+	var out []string
+	for _, s := range spawns {
+		if strings.TrimSuffix(s, ".exe") != self {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 func isLoopback(ip string) bool {
 	return strings.HasPrefix(ip, "127.") || ip == "::1"
 }
 
-// genericRuntimes run someone else's code, so the program that matters is
-// the script or package they were given, not the runtime executable.
-var genericRuntimes = map[string]bool{
-	"node.exe": true, "node": true, "bun.exe": true, "deno.exe": true,
-	"python.exe": true, "python3.exe": true, "pythonw.exe": true, "python": true, "python3": true,
-	"npx.exe": true, "npx.cmd": true, "uvx.exe": true, "uv.exe": true, "pipx.exe": true,
-	"java.exe": true, "javaw.exe": true, "dotnet.exe": true, "cmd.exe": true,
+// isGenericRuntime reports whether a program runs someone else's code, so
+// the program that matters is the script or package it was given, not the
+// runtime executable (node, python3.12, uvx, java, …, on any OS).
+func isGenericRuntime(name string) bool {
+	n := strings.ToLower(name)
+	n = strings.TrimSuffix(strings.TrimSuffix(n, ".exe"), ".cmd")
+	switch n {
+	case "node", "bun", "deno", "npx", "uvx", "uv", "pipx", "java", "javaw", "dotnet", "pythonw":
+		return true
+	case "cmd":
+		return strings.HasSuffix(strings.ToLower(name), ".exe")
+	}
+	if rest, ok := strings.CutPrefix(n, "python"); ok {
+		return strings.Trim(rest, "0123456789.") == ""
+	}
+	return false
 }
 
-// launchTarget returns the first non-flag argument of a generic runtime's
-// command line, e.g. the .js file node runs or the package uvx starts.
-// It returns "" for ordinary executables.
-func launchTarget(p ProcInfo) string {
-	if !genericRuntimes[strings.ToLower(p.Name)] {
-		return ""
+// valueFlags take a separate value that is not the program to run
+// ("python3 -X utf8 agent.py", "java -cp lib -jar x.jar").
+var valueFlags = map[string]bool{
+	"-X": true, "-W": true, "-Q": true, "--check-hash-based-pycs": true,
+	"-cp": true, "-classpath": true, "--class-path": true,
+	"--title": true, "--inspect-port": true, "--with": true, "--from": true, "--python": true,
+}
+
+// codeFlags load or run extra code; their values become part of the
+// identity, so "node --require=evil.js cli.js" is not the approved cli.js.
+var codeFlags = map[string]bool{
+	"-r": true, "--require": true, "--import": true, "--loader": true, "--experimental-loader": true,
+	"-e": true, "--eval": true, "-c": true, "-javaagent": true,
+}
+
+// launchTarget returns what a generic runtime runs: target identifies it
+// (script or package, plus any extra code it loads) and script is the
+// file to hash when it exists. Relative paths are resolved against the
+// process's working directory. Ordinary executables return "", "".
+func launchTarget(p ProcInfo) (target, script string) {
+	if !isGenericRuntime(p.Name) {
+		return "", ""
 	}
 	args := splitCmdline(p.Cmdline)
+	var extra []string
+loop:
 	for i := 1; i < len(args); i++ {
 		a := args[i]
 		switch {
+		case a == "-m" && i+1 < len(args): // python -m module
+			target = args[i+1]
+			break loop
 		case strings.HasPrefix(a, "-"):
-			if a == "-m" && i+1 < len(args) { // python -m module
-				return args[i+1]
+			flag, val, hasEq := strings.Cut(a, "=")
+			if strings.HasPrefix(flag, "-javaagent:") {
+				flag, val, hasEq = "-javaagent", strings.TrimPrefix(a, "-javaagent:"), true
+			}
+			switch {
+			case codeFlags[flag]:
+				if !hasEq && i+1 < len(args) {
+					i++
+					val = args[i]
+				}
+				extra = append(extra, flag+" "+val)
+				if flag == "-c" || flag == "-e" || flag == "--eval" {
+					break loop // inline code: the rest is its arguments
+				}
+			case valueFlags[flag] && !hasEq:
+				i++
 			}
 		case strings.EqualFold(a, "run") || strings.EqualFold(a, "exec") || strings.EqualFold(a, "/c"):
 			// "uv run x", "npx exec x", "cmd /c x" — the target follows
 		default:
-			return a
+			target = a
+			break loop
 		}
 	}
-	return ""
+	if target != "" && p.Cwd != "" && looksLikePath(target) && !isAbs(target) {
+		target = filepath.Join(p.Cwd, target)
+	}
+	if looksLikePath(target) {
+		script = target
+	}
+	if len(extra) > 0 {
+		target = strings.TrimSpace(target + " [" + strings.Join(extra, "; ") + "]")
+	}
+	return target, script
+}
+
+func looksLikePath(s string) bool {
+	if strings.ContainsAny(s, `/\`) {
+		return true
+	}
+	switch strings.ToLower(filepath.Ext(s)) {
+	case ".py", ".js", ".mjs", ".cjs", ".ts", ".jar", ".dll", ".pyz":
+		return true
+	}
+	return false
+}
+
+func isAbs(p string) bool {
+	return strings.HasPrefix(p, "/") || strings.HasPrefix(p, `\`) || (len(p) > 2 && p[1] == ':')
+}
+
+// autostartKey is how auto-start entries and running processes are
+// matched: the executable, plus the script for generic runtimes — one
+// "node app.js" service must not mark every node program as auto-started.
+func autostartKey(exe, command string) string {
+	name := filepath.Base(strings.ReplaceAll(exe, `\`, "/"))
+	if !isGenericRuntime(name) {
+		return strings.ToLower(exe)
+	}
+	t, _ := launchTarget(ProcInfo{Name: name, Cmdline: command})
+	return strings.ToLower(exe + "|" + t)
+}
+
+// identityNames is the program's file name plus its script's or module's
+// name — not the folders they sit in ("~/agentic-rag/…/nodemon" is not
+// about agents).
+func identityNames(p ProcInfo) string {
+	args := splitCmdline(p.Cmdline)
+	out := filepath.Base(strings.ReplaceAll(p.Exe, `\`, "/"))
+	if len(args) > 0 {
+		out = filepath.Base(strings.ReplaceAll(args[0], `\`, "/"))
+	}
+	if t, script := launchTarget(p); script != "" {
+		out += " " + filepath.Base(strings.ReplaceAll(script, `\`, "/"))
+	} else if t != "" {
+		out += " " + t
+	}
+	return out
+}
+
+// identity is the part of a command line that says what a program IS:
+// its executable plus, for runtimes, what it runs. Arguments such as files
+// it reads, folders it opens or packages it installs are excluded, so
+// "rg openclaw", "code ~/src/opencode" or "npm install @modelcontextprotocol/sdk"
+// are not those agents.
+func identity(p ProcInfo) string {
+	args := splitCmdline(p.Cmdline)
+	if len(args) == 0 {
+		return p.Exe
+	}
+	t, _ := launchTarget(p)
+	return strings.TrimSpace(args[0] + " " + t)
 }
 
 // shellIdentity is the part of a shell's command line that says what the
@@ -620,7 +776,7 @@ func AgentFingerprint(d Detection) string {
 
 // redactSecrets masks values that look like API keys or tokens before a
 // command line is stored or shown. Command lines often carry secrets.
-var secretRe = regexp.MustCompile(`(?i)((?:api[_-]?key|token|secret|password|authorization)["']?\s*[=:]\s*["']?)[^\s"']+|\b(sk-[A-Za-z0-9_-]{8,}|ghp_[A-Za-z0-9]{8,}|AIza[A-Za-z0-9_-]{8,})`)
+var secretRe = regexp.MustCompile(`(?i)((?:(?:api[_-]?key|token|secret|password|passwd)["']?(?:\s*[=:]\s*|\s+)|authorization["']?\s*[=:]\s*|\b(?:bearer|basic)\s+)["']?(?:(?:bearer|basic)\s+)?)[^\s"']+|\b(sk-[A-Za-z0-9_-]{8,}|ghp_[A-Za-z0-9]{8,}|github_pat_[A-Za-z0-9_]{8,}|gh[ousr]_[A-Za-z0-9]{8,}|glpat-[A-Za-z0-9_-]{8,}|hf_[A-Za-z0-9]{8,}|gsk_[A-Za-z0-9]{8,}|xox[abprs]-[A-Za-z0-9-]{8,}|AKIA[A-Z0-9]{12,}|AIza[A-Za-z0-9_-]{8,})`)
 
 func redactSecrets(s string) string {
 	return secretRe.ReplaceAllStringFunc(s, func(m string) string {

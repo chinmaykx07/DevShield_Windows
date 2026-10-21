@@ -14,12 +14,18 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 
 if [ "${1:-}" != "--inner" ]; then
 	[ "$(id -u)" = 0 ] || { echo "run as root"; exit 2; }
-	WORK=$(mktemp -d /tmp/devshield-live.XXXXXX)
-	BIN=${1:-}
-	if [ -z "$BIN" ]; then
-		BIN=$WORK/devshield
-		(cd "$HERE/../.." && go build -o "$BIN" .) || exit 2
+	# Not under /tmp: Agent Watch rightly flags scripts that run from /tmp,
+	# and the fake agent's script lives here. World-traversable, so the
+	# unprivileged-user checks can reach the binary and the socket.
+	WORK=$(mktemp -d /var/lib/devshield-live.XXXXXX)
+	chmod 755 "$WORK"
+	if [ -n "${1:-}" ]; then
+		cp "$1" "$WORK/devshield" || exit 2
+	else
+		(cd "$HERE/../.." && go build -o "$WORK/devshield" .) || exit 2
 	fi
+	chmod 755 "$WORK/devshield"
+	BIN=$WORK/devshield
 	modes=fresh
 	grep -q ' - cgroup2 ' /proc/self/mountinfo && modes="fresh host"
 	rc=0
@@ -48,6 +54,7 @@ else
 fi
 echo "== layout: $MODE ($CG)"
 python3 "$HERE/netns_setup.py" || exit 1
+python3 "$HERE/forward_probe.py" setup || exit 1
 
 check() { # check NAME ACTUAL EXPECTED
 	if [ "$2" = "$3" ]; then echo "  PASS  $1"; else echo "  FAIL  $1: got '$2', want '$3'"; fails=$((fails + 1)); diag; fi
@@ -57,6 +64,8 @@ diag() { # state worth seeing when a check fails
 	for p in $AG $(cat "$D/kids.pid" 2>/dev/null); do echo "    pid $p: $(tr '\0' ' ' </proc/$p/cmdline 2>/dev/null | cut -c1-60) cgroup $(grep '^0::' /proc/$p/cgroup 2>/dev/null)"; done
 	$DS agents --json 2>/dev/null | python3 -c "import json,sys;[print('    agent',a['id'],a['name'],a['processes'],a.get('network_blocked')) for a in json.load(sys.stdin)]"
 	$DS events -n 8 2>/dev/null | cut -c1-150 | sed 's/^/    /'
+	echo "    ip_forward=$(cat /proc/sys/net/ipv4/ip_forward) links (this namespace): $(python3 -c 'import socket;print(" ".join(n for _, n in socket.if_nameindex()))')"
+	nft list ruleset 2>&1 | sed 's/^/    nft: /' | head -40
 }
 waitfor() { # waitfor SECONDS COMMAND...
 	n=$1; shift
@@ -69,7 +78,7 @@ lastudp() { sleep 1.5; grep udp "$D/$1.log" | tail -1 | cut -d' ' -f2; }
 event() { $DS events -n 100 | grep -q "$1"; }
 probe() { $FX probe "$@"; }
 startd() {
-	$BIN daemon --state-dir "$D/st" --socket "$SOCK" --catalog "$D/catalog.json" --hosts-list /nonexistent 2>>"$D/daemon.err" &
+	$BIN daemon --state-dir "$D/st" --socket "$SOCK" --catalog "$D/catalog.json" --hosts-list /nonexistent --owner nobody 2>>"$D/daemon.err" &
 	DMN=$!
 	waitfor 10 $DS status
 }
@@ -92,6 +101,26 @@ startd
 startagent
 waitfor 30 sh -c "$DS agents | grep -q 'Live Test Agent'"
 ID=$(agentjson id)
+
+echo "-- real users: the owner may read, nobody else; only root may change policy"
+as() { su "$1" -s /bin/sh -c "$2" 2>&1; }
+check "owner (nobody) can read status" "$(as nobody "$DS status >/dev/null && echo ok")" ok
+check "another user (daemon) cannot read" "$(as daemon "$DS status" | grep -c 'not authorized')" 1
+check "the owner cannot change policy" "$(as nobody "$DS sanction $ID" | grep -c 'requires root')" 1
+check "the attempt is logged with the program that tried" "$($DS events -n 20 | grep AGENT_TAMPER_ATTEMPT | grep -c 'sanction')" 1
+check "the audit log is root-only" "$(stat -c %a "$D/st/audit.log")" 600
+
+echo "-- telemetry sinkhole on the real resolver (a private copy of /etc/hosts)"
+cp /etc/hosts "$D/hosts.orig"
+cp /etc/hosts "$D/hosts.work"
+mount --bind "$D/hosts.work" /etc/hosts
+check "before: not sinkholed (control)" "$(getent hosts metrics.ubuntu.com | cut -d' ' -f1)" ""
+$DS sinkhole on >/dev/null
+check "on: the resolver answers 0.0.0.0" "$(getent hosts metrics.ubuntu.com | cut -d' ' -f1)" 0.0.0.0
+check "on: the owner's own entries still resolve" "$(getent hosts localhost | cut -d' ' -f1 | head -1 | grep -c -E '127.0.0.1|::1')" 1
+$DS sinkhole off >/dev/null
+check "off: /etc/hosts byte-identical to before" "$(cmp -s "$D/hosts.orig" /etc/hosts && echo same)" same
+umount /etc/hosts
 
 echo "-- detection is the test agent and nothing else"
 check "detected exe is python" "$(agentjson exe | grep -c python)" 1
@@ -130,10 +159,18 @@ startagent
 
 echo "-- lockdown"
 check "before lockdown" "$(probe)" ok
+check "forwarded (container/VM) traffic before lockdown (control)" "$(python3 "$HERE/forward_probe.py" probe)" forwarded
+check "UDP to a public host's port 67 before lockdown (control)" "$($FX udpsend 198.51.100.2 67)" ok
 $DS lockdown on --via wg0 >/dev/null
 check "via absent wg0: root blocked" "$(probe)" EPERM
 check "via absent wg0: other user blocked" "$(probe 65534)" EPERM
 check "loopback still works" "$(python3 -c 'import socket;socket.create_connection(("127.0.0.1",9001),timeout=1);print("ok")')" ok
+check "forwarded (container/VM) traffic blocked" "$(python3 "$HERE/forward_probe.py" probe)" dropped
+check "DHCP port is no way out: public host, any port" "$($FX udpsend 198.51.100.2 67)" EPERM
+check "DHCP port is no way out: public host, from port 68" "$($FX udpsend 198.51.100.2 67 68)" EPERM
+check "real DHCP to the local network still works" "$($FX udpsend 10.9.9.2 67 68)" ok
+$DS lockdown on --via fwout >/dev/null
+check "forwarded traffic through the tunnel interface" "$(python3 "$HERE/forward_probe.py" probe)" forwarded
 $DS lockdown on --via dstest0 >/dev/null
 check "via the tunnel interface" "$(probe)" ok
 $DS lockdown on --via wg0 --user nobody >/dev/null
@@ -160,13 +197,14 @@ check "deleted table restored" "$(waitfor 15 nft list table inet devshield && pr
 
 echo "-- dead-man switch"
 $DS lockdown off >/dev/null
-$DS lockdown on --via wg0 --confirm-within 3s >/dev/null
+check "a window shorter than 10 s is refused" "$($DS lockdown on --via wg0 --confirm-within 3s >/dev/null 2>&1 && echo accepted || echo refused)" refused
+$DS lockdown on --via wg0 --confirm-within 10s >/dev/null
 check "active during window" "$(probe)" EPERM
-sleep 5
+sleep 12
 check "reverted without confirm" "$(probe)" ok
-$DS lockdown on --via wg0 --confirm-within 3s >/dev/null
+$DS lockdown on --via wg0 --confirm-within 10s >/dev/null
 $DS lockdown confirm >/dev/null
-sleep 4
+sleep 11
 check "kept after confirm" "$(probe)" EPERM
 
 echo "-- persistence"

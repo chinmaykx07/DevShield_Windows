@@ -26,6 +26,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // QuarantineCgroup is the cgroup v2 group (directly under the root) whose
@@ -37,6 +38,11 @@ const AllowedCgroup = "devshield-allowed"
 
 // TableName is DevShield's own nftables table.
 const TableName = "devshield"
+
+// MinConfirm is the shortest dead-man window: shorter ones cannot be
+// confirmed in time and would only look like protection. (A variable so
+// tests can shorten it.)
+var MinConfirm = 10 * time.Second
 
 // Lockdown restricts all outbound traffic to approved paths.
 type Lockdown struct {
@@ -276,20 +282,57 @@ func Render(p Policy) (string, error) {
 		for _, u := range users {
 			fmt.Fprintf(&b, "\t\tmeta skuid %d accept comment \"allowed service user\"\n", u)
 		}
-		// Keep the link itself working: DHCP and IPv6 neighbour discovery.
-		b.WriteString("\t\tudp dport { 67, 547 } accept comment \"dhcp\"\n")
-		b.WriteString("\t\ticmpv6 type { nd-router-solicit, nd-neighbor-solicit, nd-neighbor-advert } accept comment \"ipv6 neighbour discovery\"\n")
-		if l.AllowLAN {
-			// The LAN router is usually also the DNS resolver: name lookups
-			// must go through the tunnel, never in clear to the local network.
-			b.WriteString("\t\tudp dport 53 drop comment \"no DNS outside the tunnel\"\n")
-			b.WriteString("\t\ttcp dport { 53, 853 } drop comment \"no DNS outside the tunnel\"\n")
-			b.WriteString("\t\tip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 224.0.0.0/4, 255.255.255.255 } accept comment \"local network\"\n")
-			b.WriteString("\t\tip6 daddr { fe80::/10, fc00::/7, ff00::/8 } accept comment \"local network\"\n")
-		}
-		b.WriteString("\t\tlog prefix \"devshield-lockdown-drop \" level info limit rate 5/minute\n")
-		b.WriteString("\t\tcounter drop comment \"devshield lockdown: everything else\"\n")
+		// Keep the link itself working, and nothing more: DHCP to the
+		// local network only (a public DHCP server's unicast renewal falls
+		// back to a broadcast rebind), and IPv6 neighbour discovery to
+		// link-local and multicast addresses. Unrestricted, these ports
+		// would be a way out for any program.
+		b.WriteString("\t\tudp sport 68 udp dport 67 ip daddr { 255.255.255.255, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16 } accept comment \"dhcp\"\n")
+		b.WriteString("\t\tudp sport 546 udp dport 547 ip6 daddr { ff02::1:2, fe80::/10 } accept comment \"dhcpv6\"\n")
+		b.WriteString("\t\ticmpv6 type { nd-router-solicit, nd-neighbor-solicit, nd-neighbor-advert } ip6 daddr { fe80::/10, ff02::/16 } accept comment \"ipv6 neighbour discovery\"\n")
+		writeLAN(&b, l)
+		writeFinalDrop(&b, "devshield-lockdown-drop ", "devshield lockdown: everything else")
 	}
-	b.WriteString("\t}\n}\n")
+	b.WriteString("\t}\n")
+	if l := p.Lockdown; l != nil {
+		// Traffic this machine forwards for containers and VMs (Docker,
+		// libvirt, network namespaces) never passes the output hook: without
+		// this chain it would leave outside the tunnel.
+		b.WriteString("\tchain forward {\n\t\ttype filter hook forward priority filter; policy accept;\n")
+		if !l.NoReplies {
+			b.WriteString("\t\tct direction reply accept comment \"replies to inbound connections\"\n")
+		}
+		ifaces := append([]string(nil), l.Interfaces...)
+		sort.Strings(ifaces)
+		for _, i := range ifaces {
+			fmt.Fprintf(&b, "\t\toifname %q accept comment \"tunnel\"\n", i)
+		}
+		writeLAN(&b, l)
+		writeFinalDrop(&b, "devshield-forward-drop ", "devshield lockdown: forwarded traffic outside the tunnel")
+		b.WriteString("\t}\n")
+	}
+	b.WriteString("}\n")
 	return b.String(), nil
+}
+
+// writeLAN allows the local network when asked, but never name lookups:
+// DNS, and the local-name protocols (mDNS, LLMNR, NetBIOS) that would
+// announce or ask for names in clear on the LAN. Printers found by name
+// over mDNS are therefore not discovered; use their IP address.
+func writeLAN(b *strings.Builder, l *Lockdown) {
+	if !l.AllowLAN {
+		return
+	}
+	b.WriteString("\t\tudp dport { 53, 137, 138, 5353, 5355 } drop comment \"no name lookups outside the tunnel\"\n")
+	b.WriteString("\t\ttcp dport { 53, 853, 5355 } drop comment \"no name lookups outside the tunnel\"\n")
+	b.WriteString("\t\tip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 224.0.0.0/4, 255.255.255.255 } accept comment \"local network\"\n")
+	b.WriteString("\t\tip6 daddr { fe80::/10, fc00::/7, ff00::/8 } accept comment \"local network\"\n")
+}
+
+// writeFinalDrop logs a sample of drops (the limit comes first: nft runs
+// statements left to right, so "log … limit" would log every packet) and
+// drops everything that reached the end of the chain.
+func writeFinalDrop(b *strings.Builder, prefix, comment string) {
+	fmt.Fprintf(b, "\t\tlimit rate 5/minute log prefix %q level info\n", prefix)
+	fmt.Fprintf(b, "\t\tcounter drop comment %q\n", comment)
 }

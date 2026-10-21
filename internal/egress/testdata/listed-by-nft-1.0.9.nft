@@ -1,0 +1,36 @@
+table inet devshield {
+	chain egress {
+		type filter hook output priority filter; policy accept;
+		socket cgroupv2 level 1 "devshield-quarantine" counter packets 0 bytes 0 drop comment "devshield quarantine"
+		ip saddr 10.0.0.2 tcp sport 51000 tcp dport 443 ip daddr 2.2.2.2 counter packets 0 bytes 0 drop comment "quarantined socket"
+		udp sport 5353 counter packets 0 bytes 0 drop comment "quarantined socket"
+		oifname "lo" accept
+		ct direction reply accept comment "replies to inbound connections"
+		socket cgroupv2 level 1 "devshield-allowed" accept comment "allowed agents"
+		oifname "wg0" accept comment "tunnel"
+		ip daddr 203.0.113.5 udp dport 51820 accept comment "tunnel endpoint"
+		ip6 daddr 2001:db8::1 tcp dport 443 accept comment "tunnel endpoint"
+		meta skuid 65534 accept comment "allowed service user"
+		udp sport 68 udp dport 67 ip daddr { 10.0.0.0/8, 100.64.0.0/10, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 255.255.255.255 } accept comment "dhcp"
+		udp sport 546 udp dport 547 ip6 daddr { fe80::/10, ff02::1:2 } accept comment "dhcpv6"
+		icmpv6 type { nd-router-solicit, nd-neighbor-solicit, nd-neighbor-advert } ip6 daddr { fe80::/10, ff02::/16 } accept comment "ipv6 neighbour discovery"
+		udp dport { 53, 137, 138, 5353, 5355 } drop comment "no name lookups outside the tunnel"
+		tcp dport { 53, 853, 5355 } drop comment "no name lookups outside the tunnel"
+		ip daddr { 10.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 255.255.255.255 } accept comment "local network"
+		ip6 daddr { fc00::/7, fe80::/10, ff00::/8 } accept comment "local network"
+		limit rate 5/minute burst 5 packets log prefix "devshield-lockdown-drop " level info
+		counter packets 0 bytes 0 drop comment "devshield lockdown: everything else"
+	}
+
+	chain forward {
+		type filter hook forward priority filter; policy accept;
+		ct direction reply accept comment "replies to inbound connections"
+		oifname "wg0" accept comment "tunnel"
+		udp dport { 53, 137, 138, 5353, 5355 } drop comment "no name lookups outside the tunnel"
+		tcp dport { 53, 853, 5355 } drop comment "no name lookups outside the tunnel"
+		ip daddr { 10.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 255.255.255.255 } accept comment "local network"
+		ip6 daddr { fc00::/7, fe80::/10, ff00::/8 } accept comment "local network"
+		limit rate 5/minute burst 5 packets log prefix "devshield-forward-drop " level info
+		counter packets 0 bytes 0 drop comment "devshield lockdown: forwarded traffic outside the tunnel"
+	}
+}

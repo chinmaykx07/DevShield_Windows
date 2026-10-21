@@ -35,18 +35,33 @@ func TestRenderLockdown(t *testing.T) {
 			t.Errorf("missing %q in:\n%s", want, s)
 		}
 	}
-	if strings.Contains(s, "10.0.0.0/8") {
+	if strings.Contains(s, `comment "local network"`) {
 		t.Error("LAN allowed without AllowLAN")
 	}
-	// The final drop must come after every accept.
-	if strings.LastIndex(s, "accept") > strings.Index(s, "counter drop comment \"devshield lockdown") {
+	// The final drop must come after every accept of its chain.
+	egress := s[:strings.Index(s, "chain forward")]
+	if strings.LastIndex(egress, "accept") > strings.Index(egress, "counter drop comment \"devshield lockdown") {
 		t.Error("an accept rule follows the final drop")
+	}
+	// Forwarded traffic (containers, VMs) is locked down too.
+	fwd := s[strings.Index(s, "chain forward"):]
+	if !strings.Contains(fwd, "hook forward") || !strings.Contains(fwd, `oifname "wg0" accept`) || !strings.Contains(fwd, "forwarded traffic outside the tunnel") {
+		t.Errorf("forward chain missing or incomplete:\n%s", fwd)
+	}
+	// DHCP and neighbour discovery only to the local link, never anywhere.
+	if strings.Contains(s, "udp dport { 67, 547 } accept") || !strings.Contains(s, "udp sport 68 udp dport 67 ip daddr {") ||
+		!strings.Contains(s, "ip6 daddr { fe80::/10, ff02::/16 } accept") {
+		t.Error("DHCP/ND rules are not restricted to the local link")
+	}
+	// Sampled logging: the limit must come before the log statement.
+	if !strings.Contains(s, "limit rate 5/minute log prefix") {
+		t.Error("log is not rate limited (statement order)")
 	}
 }
 
 func TestLANDoesNotLeakDNS(t *testing.T) {
 	s, _ := Render(Policy{Lockdown: &Lockdown{Interfaces: []string{"wg0"}, AllowLAN: true}})
-	dns, lan := strings.Index(s, "udp dport 53 drop"), strings.Index(s, "10.0.0.0/8")
+	dns, lan := strings.Index(s, "udp dport { 53, 137, 138, 5353, 5355 } drop"), strings.Index(s, `comment "local network"`)
 	if dns < 0 || lan < 0 || dns > lan || strings.Index(s, `oifname "wg0"`) > dns {
 		t.Fatalf("DNS must be dropped after the tunnel accept and before the LAN accept:\n%s", s)
 	}

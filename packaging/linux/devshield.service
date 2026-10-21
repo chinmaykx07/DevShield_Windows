@@ -28,10 +28,12 @@ UMask=0077
 # Only what Agent Watch needs: read every process's environment, loaded
 # libraries and executable (CAP_SYS_PTRACE), and read users' autostart
 # files (CAP_DAC_READ_SEARCH). Network quarantine/lockdown load DevShield's
-# own nftables table (CAP_NET_ADMIN). Thermal profiles and moving a blocked
-# agent into the quarantine cgroup write root-owned files, which needs no
-# extra capability.
-CapabilityBoundingSet=CAP_SYS_PTRACE CAP_DAC_READ_SEARCH CAP_NET_ADMIN
+# own nftables table (CAP_NET_ADMIN). Unblocking puts an agent's processes
+# back into their original cgroup, which systemd often delegates to the
+# user (their cgroup.procs is user-owned), so writing it needs
+# CAP_DAC_OVERRIDE; without it DevShield falls back to the root cgroup and
+# says so (EGRESS_RELEASE_FALLBACK). Not yet verified under systemd.
+CapabilityBoundingSet=CAP_SYS_PTRACE CAP_DAC_READ_SEARCH CAP_NET_ADMIN CAP_DAC_OVERRIDE
 NoNewPrivileges=yes
 ProtectSystem=strict
 # The only places outside the state directory DevShield writes: the

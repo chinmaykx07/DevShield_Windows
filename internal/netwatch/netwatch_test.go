@@ -55,13 +55,41 @@ func TestResolverKeepsLastGoodSetAndIgnoresSinkhole(t *testing.T) {
 		}
 		return []string{"203.0.113.9"}, nil
 	}}
-	ips := r.IPs([]string{"telemetry.example", "sinkholed.example"})
+	r.Refresh([]string{"telemetry.example", "sinkholed.example"})
+	ips := r.IPs(nil)
 	if ips["203.0.113.9"] != "telemetry.example" || len(ips) != 1 {
 		t.Fatalf("ips = %v", ips)
 	}
 	online = false
-	if ips := r.IPs([]string{"telemetry.example"}); ips["203.0.113.9"] == "" {
+	r.Refresh([]string{"telemetry.example"})
+	if ips := r.IPs(nil); ips["203.0.113.9"] == "" {
 		t.Fatal("offline refresh dropped the last good set")
+	}
+}
+
+// A request must never wait for DNS (found in review: during a lockdown
+// "devshield net" could exceed the 10 s IPC deadline).
+func TestResolverNeverBlocksCaller(t *testing.T) {
+	release := make(chan struct{})
+	r := &Resolver{Interval: time.Hour, Lookup: func(string) ([]string, error) {
+		<-release
+		return []string{"203.0.113.9"}, nil
+	}}
+	start := time.Now()
+	if ips := r.IPs([]string{"a.example", "b.example"}); len(ips) != 0 {
+		t.Fatalf("got %v before any lookup finished", ips)
+	}
+	r.IPs([]string{"a.example"}) // a second caller must not start a second refresh or wait
+	if time.Since(start) > 100*time.Millisecond {
+		t.Fatal("caller waited for DNS")
+	}
+	close(release)
+	deadline := time.Now().Add(2 * time.Second)
+	for len(r.IPs(nil)) == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(r.IPs(nil)) == 0 {
+		t.Fatal("background refresh never landed")
 	}
 }
 

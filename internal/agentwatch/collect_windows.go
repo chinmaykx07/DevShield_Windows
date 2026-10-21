@@ -83,8 +83,12 @@ func autostartEntries() map[string]string {
 		names, _ := key.ReadValueNames(-1)
 		for _, n := range names {
 			if v, _, err := key.GetStringValue(n); err == nil {
-				if exe := exeFromCommand(os.ExpandEnv(v)); exe != "" {
-					out[strings.ToLower(exe)] = k.name + ` "` + n + `"`
+				// REG_EXPAND_SZ values hold %VAR% paths; os.ExpandEnv only knows $VAR.
+				if x, err := registry.ExpandString(v); err == nil {
+					v = x
+				}
+				if exe := exeFromCommand(v); exe != "" {
+					out[autostartKey(exe, v)] = k.name + ` "` + n + `"`
 				}
 			}
 		}
