@@ -42,7 +42,7 @@ import (
 const cliUsage = `DevShield — keeps the machine under its owner's control
 
 Usage:
-  devshield                       start the tray app
+  devshield                       start the tray app (Windows only for now)
   devshield daemon [flags]        run the privileged service (Linux, as root)
   devshield status                daemon health and audit-log integrity
   devshield agents [--json]       running AI agents and their verdicts
@@ -701,7 +701,7 @@ func cliNet(args []string, socket string, stdout, stderr io.Writer) int {
 		return 0
 	}
 	shown, telemetry := 0, 0
-	fmt.Fprintf(stdout, "%-10s %-20s %7s  %-24s %s\n", "KIND", "PROGRAM", "PID", "REMOTE", "LIKELY")
+	fmt.Fprintf(stdout, "%-10s %-20s %7s  %-24s %4s  %s\n", "KIND", "PROGRAM", "PID", "REMOTE", "CONN", "LIKELY")
 	for _, e := range resp.Net {
 		if e.Category == "telemetry" {
 			telemetry++
@@ -710,7 +710,7 @@ func cliNet(args []string, socket string, stdout, stderr io.Writer) int {
 			continue
 		}
 		shown++
-		fmt.Fprintf(stdout, "%s %-7s %-20s %7d  %-24s %s\n", netIcon[e.Category], e.Category, truncate(e.Program, 20), e.PID, e.Remote, e.Host)
+		fmt.Fprintf(stdout, "%s %-7s %-20s %7d  %-24s %4d  %s\n", netIcon[e.Category], e.Category, truncate(e.Program, 20), e.PID, e.Remote, e.Count, e.Host)
 	}
 	if shown == 0 {
 		fmt.Fprintln(stdout, "No outbound connections right now.")

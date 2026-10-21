@@ -10,8 +10,10 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"os"
+	"runtime"
 
 	"fyne.io/systray"
 )
@@ -26,6 +28,12 @@ func main() {
 	// Any arguments → command-line mode (daemon, status, agents, …).
 	if len(os.Args) > 1 {
 		os.Exit(runCLI(os.Args[1:], os.Stdout, os.Stderr))
+	}
+	if runtime.GOOS != "windows" {
+		// The tray drives the Windows PowerShell scripts; elsewhere those are
+		// compile-only stubs, so starting it would only pretend to work.
+		fmt.Fprint(os.Stderr, "The DevShield tray is Windows-only for now (a Linux tray is planned).\nOn Linux, run the daemon and use the commands below.\n\n"+cliUsage)
+		os.Exit(2)
 	}
 
 	// 0. Configure logger

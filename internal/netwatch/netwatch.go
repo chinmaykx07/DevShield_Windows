@@ -15,6 +15,7 @@
 package netwatch
 
 import (
+	"fmt"
 	"net"
 	"sort"
 	"sync"
@@ -39,13 +40,21 @@ type Entry struct {
 	Remote   string `json:"remote"`
 	Category string `json:"category"`
 	Host     string `json:"host,omitempty"` // the known name behind the IP
+	Count    int    `json:"count"`          // connections from this process to this endpoint
 }
 
 // Classify labels conns. llmHost and telemetry map an IP to a host name.
 func Classify(conns []Conn, llmHost func(ip string) string, telemetry map[string]string) []Entry {
 	out := make([]Entry, 0, len(conns))
+	index := map[string]int{} // pid|remote → position, to merge parallel connections
 	for _, c := range conns {
-		e := Entry{PID: c.PID, Program: c.Name, Exe: c.Exe, User: c.User, Remote: c.Remote, Category: "other"}
+		key := fmt.Sprint(c.PID, "|", c.Remote)
+		if i, ok := index[key]; ok {
+			out[i].Count++
+			continue
+		}
+		index[key] = len(out)
+		e := Entry{PID: c.PID, Program: c.Name, Exe: c.Exe, User: c.User, Remote: c.Remote, Category: "other", Count: 1}
 		host, _, err := net.SplitHostPort(c.Remote)
 		ip := net.ParseIP(host)
 		switch {

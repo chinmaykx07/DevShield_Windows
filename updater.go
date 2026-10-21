@@ -1,14 +1,15 @@
-// updater.go — Automatic update checker
+// updater.go — Update check, only when the owner asks for it
 //
-// Polls the GitHub Releases API on startup and every 24 hours.
-// Compares the latest release tag against the running dsVersion.
-// If a newer version exists, fires registered callbacks so tray.go
-// can show a notification item in the menu.
+// DevShield makes no network connection on its own: a check is one request
+// to the GitHub Releases API, sent only when the owner clicks "Check for
+// updates" in the tray (it reveals this machine's IP address to GitHub).
+// Compares the latest release tag against the running dsVersion. If a
+// newer version exists, fires registered callbacks so tray.go can show a
+// notification item in the menu.
 //
 // Design principles:
-//   · Never auto-installs — user always decides
-//   · Non-blocking — runs in a goroutine, never delays startup
-//   · Fails silently — no network = no problem, update check is best-effort
+//   · Never automatic, never auto-installs — the owner decides both
+//   · Non-blocking — runs in a goroutine
 //   · Respects user dismissal — once dismissed, won't re-notify for that version
 
 package main
@@ -52,8 +53,13 @@ type ghRelease struct {
 // ── INIT / SHUTDOWN ───────────────────────────────────────────
 
 func initUpdater() {
-	go updater.run()
-	log.Printf("updater: started (current=%s)", dsVersion)
+	log.Printf("updater: no automatic checks (current=%s); use the tray's \"Check for updates\"", dsVersion)
+}
+
+// CheckForUpdatesNow runs one owner-requested check. It returns the latest
+// version tag ("" if none is published) and whether it is newer.
+func CheckForUpdatesNow() (latest string, newer bool, err error) {
+	return updater.check()
 }
 
 func shutdownUpdater() {
@@ -64,45 +70,22 @@ func shutdownUpdater() {
 	}
 }
 
-// ── POLLER ────────────────────────────────────────────────────
+// ── CHECK ─────────────────────────────────────────────────────
 
-func (u *UpdateState) run() {
-	// First check: 30 seconds after startup (let everything else settle)
-	select {
-	case <-u.stopCh:
-		return
-	case <-time.After(30 * time.Second):
-	}
-	u.check()
-
-	ticker := time.NewTicker(24 * time.Hour)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-u.stopCh:
-			log.Println("updater: stopped")
-			return
-		case <-ticker.C:
-			u.check()
-		}
-	}
-}
-
-func (u *UpdateState) check() {
+func (u *UpdateState) check() (string, bool, error) {
 	latest, url, err := fetchLatestRelease()
 	if err != nil {
 		log.Printf("updater: check failed (network issue): %v", err)
-		return
+		return "", false, err
 	}
 	if latest == "" {
-		return // no stable release found
+		return "", false, nil // no stable release found
 	}
 
 	log.Printf("updater: latest=%s current=%s", latest, dsVersion)
 
 	if !isNewer(latest, dsVersion) {
-		return // already up to date
+		return latest, false, nil // already up to date
 	}
 
 	u.mu.Lock()
@@ -113,7 +96,7 @@ func (u *UpdateState) check() {
 	u.mu.Unlock()
 
 	if dismissed == latest {
-		return // user already dismissed this version
+		return latest, true, nil // user already dismissed this version
 	}
 
 	WriteGoEvent("UPDATE_AVAILABLE",
@@ -123,6 +106,7 @@ func (u *UpdateState) check() {
 	for _, cb := range cbs {
 		go cb(latest)
 	}
+	return latest, true, nil
 }
 
 // ── GITHUB API ────────────────────────────────────────────────

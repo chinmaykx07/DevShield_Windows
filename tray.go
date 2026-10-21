@@ -57,7 +57,8 @@ type trayRefs struct {
 	mAutoSwitch *systray.MenuItem
 
 	// Update notification (hidden until an update is available)
-	mUpdate *systray.MenuItem
+	mUpdate      *systray.MenuItem
+	mCheckUpdate *systray.MenuItem
 
 	// Quit
 	mQuit *systray.MenuItem
@@ -150,6 +151,8 @@ func buildMenu() {
 	// ── Update notification (hidden — shown only when an update exists) ──
 	tr.mUpdate = systray.AddMenuItem("", "A newer version of DevShield is available")
 	tr.mUpdate.Hide()
+	// Never automatic: one request to GitHub, only when clicked.
+	tr.mCheckUpdate = systray.AddMenuItem("Check for updates (contacts github.com)", "Sends one request to GitHub's release API")
 
 	systray.AddSeparator()
 
@@ -297,6 +300,22 @@ func startClickRouter() {
 						DismissUpdate(v)
 					}
 					tr.mUpdate.Hide()
+				}()
+
+			case <-tr.mCheckUpdate.ClickedCh:
+				go func() {
+					tr.mCheckUpdate.SetTitle("Checking for updates…")
+					latest, newer, err := CheckForUpdatesNow()
+					switch {
+					case err != nil:
+						tr.mCheckUpdate.SetTitle("Update check failed — click to retry")
+					case newer:
+						tr.mCheckUpdate.SetTitle("Check for updates (contacts github.com)")
+					case latest == "":
+						tr.mCheckUpdate.SetTitle("No release published yet — click to check again")
+					default:
+						tr.mCheckUpdate.SetTitle("Up to date (" + dsVersion + ") — click to check again")
+					}
 				}()
 
 			// ── Quit ──────────────────────────────────────────
