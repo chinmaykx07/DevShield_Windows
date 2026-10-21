@@ -219,3 +219,60 @@ func mustMarshal(t *testing.T, r Record) string {
 	}
 	return string(b)
 }
+
+// Deleting the last records AND the head must not verify as intact (found
+// in the 2026-10-21 self-review).
+func TestMissingHeadIsReported(t *testing.T) {
+	path := newLog(t, 4)
+	lines := readLines(t, path)
+	writeLines(t, path, lines[:2]) // truncate...
+	os.Remove(path + ".head")      // ...and hide it
+	wantTamper(t, path, "head file missing")
+}
+
+// The innocent case: verifying while the very first records are written
+// (the record lands before the head) must not be reported as tampering.
+func TestVerifyDuringFirstAppendsIsNotTamper(t *testing.T) {
+	for round := 0; round < 50; round++ {
+		path := filepath.Join(t.TempDir(), "audit.log")
+		l, _, err := Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			for i := 0; i < 3; i++ {
+				l.Append("X", "", "ok", "test")
+			}
+		}()
+		for running := true; running; {
+			select {
+			case <-done:
+				running = false
+			default:
+				if _, err := Verify(path); err != nil {
+					t.Fatalf("round %d: false tamper report during first appends: %v", round, err)
+				}
+			}
+		}
+		l.Close()
+	}
+}
+
+// Deterministic version of the race: a record is appended exactly between
+// verify's two reads. Reading the head first makes this harmless; reading
+// the log first would see a head newer than the file ("truncated").
+func TestAppendBetweenVerifyReadsIsNotTamper(t *testing.T) {
+	path := newLog(t, 2)
+	l, _, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	betweenReads = func() { l.Append("BETWEEN", "", "ok", "test") }
+	defer func() { betweenReads = nil }()
+	if _, err := Verify(path); err != nil {
+		t.Fatalf("append between reads reported as tampering: %v", err)
+	}
+}

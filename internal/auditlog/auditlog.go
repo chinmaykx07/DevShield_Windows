@@ -113,6 +113,15 @@ func Open(path string) (*Log, OpenInfo, error) {
 		os.Rename(headPath(path), info.Aside+".head")
 		n = 0
 	}
+	if n == 0 {
+		// The head exists before the first record, so a log with records
+		// and no head can only mean the head was removed.
+		if _, _, ok := readHead(path); !ok {
+			if err := writeHead(path, 0, genesis); err != nil {
+				return nil, info, err
+			}
+		}
+	}
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
 	if err != nil {
 		return nil, info, err
@@ -216,12 +225,18 @@ func Verify(path string) (int, error) {
 	return n, err
 }
 
+// betweenReads lets a test append exactly between verify's two reads.
+var betweenReads func()
+
 func verify(path string) (int, Record, error) {
 	var last Record
 	// The head is read FIRST: records are written before the head, so
 	// every record the head vouches for is complete by now. Reading the
 	// file first and the head second races with a concurrent append.
 	hseq, hhash, hok := readHead(path)
+	if betweenReads != nil {
+		betweenReads()
+	}
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		if hok && hseq > 0 {
@@ -262,6 +277,11 @@ func verify(path string) (int, Record, error) {
 	}
 	if err := sc.Err(); err != nil {
 		return n, last, err
+	}
+	if !hok && n > 0 {
+		// Open creates the head before any record exists, so records
+		// without a head mean it was deleted (perhaps to hide a truncation).
+		return n, last, &ChainError{Reason: "head file missing or unreadable — truncation can't be ruled out (it may have been deleted)"}
 	}
 	if hok {
 		if hseq > uint64(n) {

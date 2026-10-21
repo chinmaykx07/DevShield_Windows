@@ -215,23 +215,26 @@ func TestUnconfirmedLockdownNeverPersisted(t *testing.T) {
 	}
 }
 
-// A timer that already fired must not revert a newer lockdown.
+// A timer that already fired must not revert a newer lockdown. The late
+// timer is simulated directly (its revert runs with the old generation),
+// so this fails deterministically without the generation check.
 func TestStaleTimerDoesNotRevertNewerLockdown(t *testing.T) {
-	MinConfirm = 0
-	defer func() { MinConfirm = 10 * time.Second }()
 	nft := &fakeNft{}
 	m := newTestManager(t, nft, t.TempDir())
-	m.LockdownOn(wg0, 50*time.Millisecond)
-	m.mu.Lock() // hold the lock so the first timer fires and waits
-	time.Sleep(100 * time.Millisecond)
-	m.mu.Unlock()
-	if err := m.LockdownOn(Lockdown{Interfaces: []string{"tun0"}}, time.Minute); err != nil {
+	if err := m.LockdownOn(wg0, time.Hour); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(100 * time.Millisecond)
+	m.mu.Lock()
+	staleGen := m.gen
+	m.mu.Unlock()
+	if err := m.LockdownOn(Lockdown{Interfaces: []string{"tun0"}}, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	m.revertPending(staleGen) // the first window's timer, arriving late
 	if l := m.Status().Lockdown; l == nil || l.Interfaces[0] != "tun0" {
 		t.Fatalf("newer lockdown reverted by a stale timer: %+v", l)
 	}
+	m.LockdownOff()
 }
 
 func TestConfirmWindowTooShortRefused(t *testing.T) {

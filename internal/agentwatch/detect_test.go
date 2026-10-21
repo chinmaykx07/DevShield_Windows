@@ -699,3 +699,21 @@ func TestRenamedChildIsCounted(t *testing.T) {
 		t.Errorf("exec'd tool hidden behind its parent's name: %v", got)
 	}
 }
+
+// An update must be "this agent changed", not "a new agent" (found in the
+// 2026-10-21 self-review): version numbers in paths don't split identity.
+func TestUpdatedAgentKeepsItsIdentity(t *testing.T) {
+	fp := func(exe, target string) string {
+		return AgentFingerprint(Detection{Name: "Claude Code", Exe: exe, Target: target})
+	}
+	if fp("/home/u/.vscode/extensions/anthropic.claude-code-2.0.14-linux-x64/resources/claude", "") !=
+		fp("/home/u/.vscode/extensions/anthropic.claude-code-2.1.0-linux-x64/resources/claude", "") {
+		t.Error("extension update produced a new identity")
+	}
+	if fp("/home/u/.local/share/claude/versions/2.0.14", "") != fp("/home/u/.local/share/claude/versions/2.1.3", "") {
+		t.Error("native update produced a new identity")
+	}
+	if fp("/usr/bin/node", "/opt/a/agent.js") == fp("/usr/bin/node", "/opt/b/agent.js") {
+		t.Error("different scripts merged")
+	}
+}

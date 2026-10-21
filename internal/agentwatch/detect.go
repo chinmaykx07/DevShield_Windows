@@ -766,13 +766,24 @@ func splitCmdline(s string) []string {
 // same agent name + same executable + same launch target = same agent.
 // The target matters for node/python/uvx: otherwise sanctioning one MCP
 // server would silently sanction every script that runtime ever runs.
+//
+// Version numbers inside paths are ignored (".../claude-code-2.0.14/..."
+// and ".../claude-code-2.1.0/..." are the same agent), so an update is
+// reported as that agent changing — which still revokes its approval,
+// because the file hash changed — instead of as a new agent.
 func AgentFingerprint(d Detection) string {
-	fp := d.Name + "|" + d.Exe
+	fp := unversioned(d.Name) + "|" + unversioned(d.Exe)
 	if d.Target != "" {
-		fp += "|" + d.Target
+		fp += "|" + unversioned(d.Target)
 	}
 	return strings.ToLower(fp)
 }
+
+// versionRe matches a dotted version and what directly follows it in the
+// same path segment ("2.0.14-linux-x64", "v20.11.0", "3.12").
+var versionRe = regexp.MustCompile(`\d+(\.\d+)+[0-9A-Za-z.+_-]*`)
+
+func unversioned(s string) string { return versionRe.ReplaceAllString(s, "*") }
 
 // redactSecrets masks values that look like API keys or tokens before a
 // command line is stored or shown. Command lines often carry secrets.

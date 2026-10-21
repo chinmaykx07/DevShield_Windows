@@ -75,13 +75,21 @@ func TestResolverNeverBlocksCaller(t *testing.T) {
 		<-release
 		return []string{"203.0.113.9"}, nil
 	}}
-	start := time.Now()
-	if ips := r.IPs([]string{"a.example", "b.example"}); len(ips) != 0 {
-		t.Fatalf("got %v before any lookup finished", ips)
-	}
-	r.IPs([]string{"a.example"}) // a second caller must not start a second refresh or wait
-	if time.Since(start) > 100*time.Millisecond {
-		t.Fatal("caller waited for DNS")
+	answered := make(chan map[string]string, 2)
+	go func() {
+		answered <- r.IPs([]string{"a.example", "b.example"})
+		answered <- r.IPs([]string{"a.example"}) // a second caller must not wait either
+	}()
+	for i := 0; i < 2; i++ {
+		select {
+		case ips := <-answered:
+			if len(ips) != 0 {
+				t.Fatalf("got %v before any lookup finished", ips)
+			}
+		case <-time.After(time.Second):
+			close(release)
+			t.Fatal("caller waited for DNS")
+		}
 	}
 	close(release)
 	deadline := time.Now().Add(2 * time.Second)
