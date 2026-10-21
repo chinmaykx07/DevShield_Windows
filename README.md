@@ -262,6 +262,8 @@ devshield/
 
 ## Roadmap
 
+Where the work stands, what's next and how to continue it: [docs/HANDOFF.md](docs/HANDOFF.md).
+
 See [docs/ROADMAP_LINUX_FIRST_AND_X402.md](docs/ROADMAP_LINUX_FIRST_AND_X402.md): Linux first (daemon, tray, .deb/.rpm), then fix and test the Windows variant (C1–C8), then macOS.
 
 ---

@@ -1,5 +1,7 @@
 # Session Status Summary
 
+> **Superseded (June 2026, kept as history).** The current state, open work and how to continue are in `docs/HANDOFF.md`.
+
 ## Repository readiness
 
 The repository is now in a push-ready state from a documentation and handoff perspective. The latest updates have been committed and pushed to the main branch.

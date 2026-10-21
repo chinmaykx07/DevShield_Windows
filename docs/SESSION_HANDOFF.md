@@ -1,5 +1,7 @@
 # Session Handoff — DevShield Windows
 
+> **Superseded (June 2026, kept as history).** The current state, open work and how to continue are in `docs/HANDOFF.md`.
+
 ## Date
 2026-06-19
 
