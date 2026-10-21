@@ -109,6 +109,7 @@ check "another user (daemon) cannot read" "$(as daemon "$DS status" | grep -c 'n
 check "the owner cannot change policy" "$(as nobody "$DS sanction $ID" | grep -c 'requires root')" 1
 check "the attempt is logged with the program that tried" "$($DS events -n 20 | grep AGENT_TAMPER_ATTEMPT | grep -c 'sanction')" 1
 check "the audit log is root-only" "$(stat -c %a "$D/st/audit.log")" 600
+check "kernel exec events in use" "$($DS events -n 50 | grep -c EXEC_EVENTS_UNAVAILABLE)" 0
 
 echo "-- telemetry sinkhole on the real resolver (a private copy of /etc/hosts)"
 cp /etc/hosts "$D/hosts.orig"
@@ -118,6 +119,22 @@ check "before: not sinkholed (control)" "$(getent hosts metrics.ubuntu.com | cut
 $DS sinkhole on >/dev/null
 check "on: the resolver answers 0.0.0.0" "$(getent hosts metrics.ubuntu.com | cut -d' ' -f1)" 0.0.0.0
 check "on: the owner's own entries still resolve" "$(getent hosts localhost | cut -d' ' -f1 | head -1 | grep -c -E '127.0.0.1|::1')" 1
+
+echo "-- encrypted DNS (block-doh), which would bypass /etc/hosts"
+check "HTTPS to a public DoH resolver before (control)" "$($FX udpsend 1.1.1.1 443)" ok
+check "DNS over TLS/QUIC port before (control)" "$($FX udpsend 203.0.113.9 853)" ok
+check "a DoH resolver's name before: not sinkholed (control)" "$(getent hosts dns.google | cut -d' ' -f1)" ""
+$DS block-doh on >/dev/null
+check "on: HTTPS/QUIC to a public DoH resolver dropped" "$($FX udpsend 1.1.1.1 443)" EPERM
+check "on: port 853 to any address dropped" "$($FX udpsend 203.0.113.9 853)" EPERM
+check "on: other HTTPS/QUIC unaffected" "$($FX udpsend 203.0.113.9 443)" ok
+check "on, with the sinkhole on: the resolver's name answers 0.0.0.0" "$(getent hosts dns.google | cut -d' ' -f1)" 0.0.0.0
+$DS egress >/dev/null
+check "DoH rules match the kernel's listing" "$?" 0
+$DS block-doh off >/dev/null
+check "off: the resolver is reachable again" "$($FX udpsend 1.1.1.1 443)" ok
+check "off: its name is no longer sinkholed" "$(getent hosts dns.google | cut -d' ' -f1)" ""
+check "off: the telemetry block is still there" "$(getent hosts metrics.ubuntu.com | cut -d' ' -f1)" 0.0.0.0
 $DS sinkhole off >/dev/null
 check "off: /etc/hosts byte-identical to before" "$(cmp -s "$D/hosts.orig" /etc/hosts && echo same)" same
 umount /etc/hosts
@@ -144,6 +161,7 @@ check "unrelated process unaffected" "$(python3 -c 'import socket;socket.create_
 
 echo "-- restart is caught again"
 stopagent; startagent
+check "restart caught within ~2 s (kernel exec events, not the 10 s scan)" "$(waitfor 2 inq && echo yes)" yes
 check "re-quarantined after restart" "$(waitfor 30 inq && echo yes)" yes
 check "restarted agent cut off" "$(stopped 9001)" stopped
 
@@ -157,6 +175,7 @@ echo "-- block while not running; rules of closed sockets go away"
 stopagent
 $DS block "$ID" >/dev/null
 startagent
+check "caught within ~2 s of starting" "$(waitfor 2 inq && echo yes)" yes
 check "caught when it starts" "$(waitfor 30 inq && echo yes)" yes
 check "cut off" "$(stopped 9001)" stopped
 stopagent
@@ -169,6 +188,7 @@ echo "-- lockdown"
 check "before lockdown" "$(probe)" ok
 check "forwarded (container/VM) traffic before lockdown (control)" "$(python3 "$HERE/forward_probe.py" probe)" forwarded
 check "UDP to a public host's port 67 before lockdown (control)" "$($FX udpsend 198.51.100.2 67)" ok
+check "a server answers an inbound connection before lockdown (control)" "$(python3 "$HERE/reply_probe.py" 9100)" replied
 $DS lockdown on --via wg0 >/dev/null
 check "via absent wg0: root blocked" "$(probe)" EPERM
 check "via absent wg0: other user blocked" "$(probe 65534)" EPERM
@@ -177,6 +197,16 @@ check "forwarded (container/VM) traffic blocked" "$(python3 "$HERE/forward_probe
 check "DHCP port is no way out: public host, any port" "$($FX udpsend 198.51.100.2 67)" EPERM
 check "DHCP port is no way out: public host, from port 68" "$($FX udpsend 198.51.100.2 67 68)" EPERM
 check "real DHCP to the local network still works" "$($FX udpsend 10.9.9.2 67 68)" ok
+check "SSH (22/tcp) still answers inbound connections" "$(python3 "$HERE/reply_probe.py" 22)" replied
+check "a server on another port can't answer whoever connects in" "$(python3 "$HERE/reply_probe.py" 9100)" dropped
+$DS lockdown on --via wg0 --inbound 9100/tcp >/dev/null
+check "--inbound 9100/tcp: that server answers" "$(python3 "$HERE/reply_probe.py" 9100)" replied
+check "--inbound replaces the default: SSH no longer answers" "$(python3 "$HERE/reply_probe.py" 22)" dropped
+$DS lockdown on --via wg0 --strict >/dev/null
+check "--strict: not even SSH answers" "$(python3 "$HERE/reply_probe.py" 22)" dropped
+$DS lockdown on --via wg0 --inbound 22/tcp --inbound 9100/tcp >/dev/null
+$DS egress >/dev/null
+check "reply rules match the kernel's listing" "$?" 0
 $DS lockdown on --via fwout >/dev/null
 check "forwarded traffic through the tunnel interface" "$(python3 "$HERE/forward_probe.py" probe)" forwarded
 $DS lockdown on --via dstest0 >/dev/null

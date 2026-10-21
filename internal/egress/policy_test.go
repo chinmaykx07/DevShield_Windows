@@ -24,7 +24,7 @@ func TestRenderLockdown(t *testing.T) {
 	}
 	for _, want := range []string{
 		`oifname "lo" accept`,
-		`ct direction reply accept`, // SSH into the box keeps working
+		`ct direction reply meta l4proto tcp ct original proto-dst 22 accept`, // SSH into the box keeps working
 		`oifname "wg0" accept`,
 		`ip daddr 203.0.113.5 udp dport 51820 accept`,
 		`ip6 daddr 2001:db8::1 tcp dport 443 accept`,
@@ -37,6 +37,9 @@ func TestRenderLockdown(t *testing.T) {
 	}
 	if strings.Contains(s, `comment "local network"`) {
 		t.Error("LAN allowed without AllowLAN")
+	}
+	if strings.Contains(s, "ct direction reply accept") {
+		t.Error("replies to every inbound connection allowed by default (a server could answer anyone)")
 	}
 	// The final drop must come after every accept of its chain.
 	egress := s[:strings.Index(s, "chain forward")]
@@ -171,5 +174,73 @@ func TestParseProcNet(t *testing.T) {
 	s6 := parseProcNet("tcp", tcp6)
 	if len(s6) != 2 || s6[0].RemoteIP.String() != "160.79.104.10" || s6[1].LocalIP.String() != "2001:db8::2" || s6[1].RemoteIP.String() != "2001:db8::1" {
 		t.Fatalf("tcp6 parsed as %+v", s6)
+	}
+}
+
+// Replies to inbound connections leave only for the services named: a
+// program serving on another port can't answer whoever connects to it.
+func TestReplyServices(t *testing.T) {
+	render := func(l Lockdown) string {
+		l.Interfaces = []string{"wg0"}
+		s, err := Render(Policy{Lockdown: &l})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	cases := []struct {
+		l         Lockdown
+		want, not []string
+	}{
+		{Lockdown{}, []string{"meta l4proto tcp ct original proto-dst 22 accept"}, []string{"ct direction reply accept"}},
+		{Lockdown{Inbound: []string{"53/udp", "8443"}}, []string{"meta l4proto udp ct original proto-dst 53 accept", "meta l4proto tcp ct original proto-dst 8443 accept"}, []string{"proto-dst 22 ", "ct direction reply accept"}},
+		{Lockdown{Inbound: []string{"all"}}, []string{"ct direction reply accept"}, []string{"proto-dst"}},
+		{Lockdown{NoReplies: true}, nil, []string{"ct direction reply"}},
+	}
+	for i, c := range cases {
+		s := render(c.l)
+		for _, w := range c.want {
+			if strings.Count(s, w) != 2 { // egress and forward chains
+				t.Errorf("case %d: want %q in both chains:\n%s", i, w, s)
+			}
+		}
+		for _, n := range c.not {
+			if strings.Contains(s, n) {
+				t.Errorf("case %d: unexpected %q:\n%s", i, n, s)
+			}
+		}
+	}
+	for _, bad := range []Lockdown{
+		{Interfaces: []string{"wg0"}, Inbound: []string{"0/tcp"}},
+		{Interfaces: []string{"wg0"}, Inbound: []string{"22/icmp"}},
+		{Interfaces: []string{"wg0"}, Inbound: []string{"ssh"}},
+		{Interfaces: []string{"wg0"}, Inbound: []string{"22/tcp"}, NoReplies: true},
+	} {
+		if err := bad.Validate(); err == nil {
+			t.Errorf("accepted %+v", bad)
+		}
+	}
+}
+
+// Encrypted DNS is dropped before any lockdown accept (so not even through
+// the tunnel), in the forward chain too, and works without a lockdown.
+func TestRenderBlockDoH(t *testing.T) {
+	if (Policy{BlockDoH: true}).Empty() {
+		t.Fatal("a policy with only BlockDoH counts as empty: its rules would never load")
+	}
+	s, err := Render(Policy{BlockDoH: true, Lockdown: &Lockdown{Interfaces: []string{"wg0"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := s[:strings.Index(s, "chain forward")]
+	dot, doh, tun := strings.Index(out, "th dport 853 counter drop"), strings.Index(out, "1.1.1.1"), strings.Index(out, `oifname "wg0" accept`)
+	if dot < 0 || doh < 0 || dot > tun || doh > tun {
+		t.Fatalf("DoH/DoT drops missing or after the tunnel accept:\n%s", out)
+	}
+	if fwd := s[strings.Index(s, "chain forward"):]; !strings.Contains(fwd, "th dport 853 counter drop") || !strings.Contains(fwd, "2001:4860:4860::8888") {
+		t.Errorf("forward chain lacks the DoH/DoT drops:\n%s", fwd)
+	}
+	if s, _ := Render(Policy{BlockDoH: true}); !strings.Contains(s, "th dport 853 counter drop") {
+		t.Errorf("not blocked without a lockdown:\n%s", s)
 	}
 }

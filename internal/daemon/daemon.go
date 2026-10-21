@@ -64,7 +64,7 @@ type Config struct {
 
 var readOps = map[string]bool{"status": true, "agents": true, "events": true, "verify": true, "thermal": true, "privacy": true, "egress": true, "lan-privacy": true, "net": true}
 var writeOps = map[string]bool{"sanction": true, "revoke": true, "profile": true, "sinkhole": true,
-	"block": true, "unblock": true, "lockdown": true, "allow": true, "disallow": true, "set-lan-privacy": true, "restore-all": true}
+	"block": true, "unblock": true, "lockdown": true, "allow": true, "disallow": true, "set-lan-privacy": true, "restore-all": true, "block-doh": true}
 
 // authorize decides whether peer may run op. tamper is true when a
 // non-root process attempted a policy change — worth an alert of its own.
@@ -427,6 +427,8 @@ func (d *Daemon) handle(peer ipc.Peer, req ipc.Request) ipc.Response {
 		return d.setAllow(req.Op, req.ID, peer)
 	case "restore-all":
 		return d.restoreAll(peer)
+	case "block-doh":
+		return d.setBlockDoH(req.Profile, peer)
 	case "net":
 		return ipc.Response{OK: true, Net: d.netEntries()}
 	case "lan-privacy":
@@ -614,8 +616,53 @@ func (d *Daemon) setLANPrivacy(mode string, peer ipc.Peer) ipc.Response {
 	return ipc.Response{OK: true, LAN: &ipc.LANPrivacy{Status: s.Check(), Result: &r}}
 }
 
-func (d *Daemon) sinkholeStatus() ipc.Response {
+// sinkholeList is the telemetry list, plus the DoH resolvers' host names
+// while encrypted DNS is blocked (browsers look those up before switching
+// to DoH; sinkholed, they keep using the system resolver).
+func (d *Daemon) sinkholeList() (hosts.List, error) {
 	l, err := hosts.LoadList(d.cfg.HostListOverride)
+	if err != nil || d.egress == nil || !d.egress.BlockingDoH() {
+		return l, err
+	}
+	l.Groups = append(l.Groups, hosts.Group{Name: "DNS-over-HTTPS resolvers (block-doh)",
+		Why:     "browsers switch to these before resolving past /etc/hosts; blocked only while block-doh is on",
+		Domains: egress.DoHHostnames})
+	return l, nil
+}
+
+// setBlockDoH turns the encrypted-DNS block on or off, and keeps the
+// sinkhole's host names in step if the sinkhole is on.
+func (d *Daemon) setBlockDoH(mode string, peer ipc.Peer) ipc.Response {
+	if d.egress == nil {
+		return ipc.Response{Error: "network controls are not available on this system"}
+	}
+	if mode != "on" && mode != "off" {
+		return ipc.Response{Error: "block-doh takes on or off"}
+	}
+	if err := d.egress.SetBlockDoH(mode == "on"); err != nil {
+		d.event("EGRESS_FAILED", fmt.Sprintf("block-doh %s: %v (by %s)", mode, err, peer), "fail")
+		return ipc.Response{Error: err.Error()}
+	}
+	note := ""
+	l, err := d.sinkholeList()
+	switch {
+	case err != nil:
+		note = "the sinkhole's host names could not be updated: " + err.Error()
+	case hosts.Check(d.cfg.SysRoot, l).Active:
+		if _, err := hosts.Apply(d.cfg.SysRoot, filepath.Join(d.cfg.StateDir, "privacy"), l); err != nil {
+			note = "the sinkhole's host names could not be updated: " + err.Error()
+		}
+	case mode == "on":
+		note = "the sinkhole is off, so the DoH resolvers' host names are not blocked in /etc/hosts: programs that reach DoH by name (browsers) are not stopped, only those using the resolvers' addresses directly; turn it on with: sudo devshield sinkhole on"
+	}
+	d.event("DOH_BLOCK_"+strings.ToUpper(mode), withNote(fmt.Sprintf("encrypted DNS to public resolvers %s by %s", map[string]string{"on": "blocked", "off": "allowed again"}[mode], peer), note), "ok")
+	resp := d.egressStatus()
+	resp.Note = note
+	return resp
+}
+
+func (d *Daemon) sinkholeStatus() ipc.Response {
+	l, err := d.sinkholeList()
 	if err != nil {
 		return ipc.Response{Error: err.Error()}
 	}
@@ -633,7 +680,7 @@ func (d *Daemon) sinkholeStatus() ipc.Response {
 func (d *Daemon) setSinkhole(mode string, peer ipc.Peer) ipc.Response {
 	switch mode {
 	case "on":
-		l, err := hosts.LoadList(d.cfg.HostListOverride)
+		l, err := d.sinkholeList()
 		if err != nil {
 			return ipc.Response{Error: err.Error()}
 		}

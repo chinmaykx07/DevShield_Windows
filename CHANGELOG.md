@@ -84,6 +84,24 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 - Tamper-evident, hash-chained audit log: edits, deletions, reordering and
   truncation are detected; unclean daemon stops are reported.
 
+- Linux: kernel exec events (the proc connector, no new dependency). A
+  blocked agent that restarts is cut off as it starts (about 10-20 ms in
+  tests, was up to 10 s), an allowed one is allowed again at once, and
+  short commands count toward the agent-loop signal (296-300 of 300 runs
+  of /bin/true caught in tests). Needs the host network namespace; falls
+  back to sampling and logs EXEC_EVENTS_UNAVAILABLE otherwise (which is
+  why the namespaced live suite skips this; it is tested end to end in
+  the host namespace instead).
+- Lockdown: replies to inbound connections leave only for the services
+  named with `--inbound` (default 22/tcp, SSH), closing the way out
+  through a server any program runs; `--inbound all` keeps the old
+  behaviour, `--strict` allows none. Live-tested.
+- `sudo devshield block-doh on|off`: drops DNS over TLS/QUIC (port 853)
+  and HTTPS to well-known public DoH resolvers, and with the sinkhole on
+  sinkholes their host names, so encrypted DNS can't quietly bypass
+  /etc/hosts. Off by default; incomplete by nature (DoH can run on any
+  HTTPS server). Live-tested.
+
 ### Changed
 - Agent Watch moved to `internal/agentwatch` as a configurable Watcher.
 - An LLM key now counts only for the process that introduced it at launch.

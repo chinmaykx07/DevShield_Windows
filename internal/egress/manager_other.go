@@ -29,6 +29,7 @@ type Status struct {
 	CgroupV2         bool        `json:"cgroup_v2"`
 	RulesLoaded      bool        `json:"rules_loaded"`
 	Unverifiable     bool        `json:"rules_unverifiable,omitempty"`
+	BlockDoH         bool        `json:"block_doh,omitempty"`
 	Blocked          []BlockInfo `json:"blocked,omitempty"`
 	Lockdown         *Lockdown   `json:"lockdown,omitempty"`
 	ConfirmBy        time.Time   `json:"confirm_by,omitempty"`
@@ -74,3 +75,6 @@ func (*Manager) Status() Status                                         { return
 func (*Manager) Reset() ([]string, error)                               { return nil, errUnsupported }
 func (*Manager) EnsureLoaded() (bool, error)                            { return false, errUnsupported }
 func (*Manager) Stop()                                                  {}
+func (*Manager) HasMembers() bool                                       { return false }
+func (*Manager) SetBlockDoH(bool) error                                 { return errUnsupported }
+func (*Manager) BlockingDoH() bool                                      { return false }

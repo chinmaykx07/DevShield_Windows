@@ -8,7 +8,11 @@
 
 package agentwatch
 
-import "github.com/shirou/gopsutil/v3/process"
+import (
+	"errors"
+
+	"github.com/shirou/gopsutil/v3/process"
+)
 
 func fastProcList() ([]fastProc, error) {
 	procs, err := process.Processes()
@@ -29,3 +33,10 @@ func processModules(pid int32) []string { return nil }
 
 // autostartEntries is not implemented outside Windows.
 func autostartEntries() map[string]string { return map[string]string{} }
+
+// startExecEvents: kernel exec events are Linux-only so far.
+func (w *Watcher) startExecEvents() error {
+	return errors.New("exec events are only implemented on Linux")
+}
+
+func readFastProc(int32) (fastProc, bool) { return fastProc{}, false }

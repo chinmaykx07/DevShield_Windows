@@ -8,6 +8,7 @@
 package agentwatch
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -122,3 +123,10 @@ func autostartEntries() map[string]string {
 	}
 	return out
 }
+
+// startExecEvents: kernel exec events are Linux-only so far.
+func (w *Watcher) startExecEvents() error {
+	return errors.New("exec events are only implemented on Linux")
+}
+
+func readFastProc(int32) (fastProc, bool) { return fastProc{}, false }

@@ -114,6 +114,8 @@ type Watcher struct {
 	catalog   *AgentCatalog
 	running   []RunningAgent
 	callbacks []func()
+	execCbs   []func(pid int32) // called for every program start (exec events)
+	execErr   error             // why exec events are unavailable (nil: in use)
 
 	llmIPs      map[string]string // ip → LLM API host
 	conns       []Conn            // every established TCP connection, last scan
@@ -169,6 +171,12 @@ func (w *Watcher) Start() {
 	w.loops.Add(2)
 	go func() { defer w.loops.Done(); w.runSpawnTicker() }()
 	go func() { defer w.loops.Done(); w.run() }()
+	if err := w.startExecEvents(); err != nil {
+		w.mu.Lock()
+		w.execErr = err
+		w.mu.Unlock()
+		log.Printf("agentwatch: no exec events, sampling only: %v", err)
+	}
 	log.Printf("agentwatch: started (catalog %s, %d agents)", w.catalog.Version, len(w.catalog.Agents))
 }
 
@@ -316,6 +324,22 @@ func (w *Watcher) scan() {
 			go cb()
 		}
 	}
+}
+
+// procInfoOf reads what identifies a process (shared by scans and
+// Identify, so both compute the same fingerprint).
+func procInfoOf(p *process.Process) ProcInfo {
+	info := ProcInfo{PID: p.Pid}
+	info.Start, _ = p.CreateTime()
+	info.Name, _ = p.Name()
+	info.PPID, _ = p.Ppid()
+	info.Exe, _ = p.Exe()
+	info.Cmdline, _ = p.Cmdline()
+	info.User, _ = p.Username()
+	if isGenericRuntime(info.Name) {
+		info.Cwd, _ = p.Cwd() // to resolve "python agent.py" to a real file
+	}
+	return info
 }
 
 // alertVerdict raises a verdict alert once per (agent, verdict, risk set),
@@ -493,15 +517,7 @@ func (w *Watcher) collect(cat *AgentCatalog) (Snapshot, error) {
 		// once per process lifetime (PID + create time).
 		c, ok := w.procCache[p.Pid]
 		if !ok || c.createTime != ct {
-			c = cachedProc{createTime: ct, info: ProcInfo{PID: p.Pid, Start: ct}}
-			c.info.Name, _ = p.Name()
-			c.info.PPID, _ = p.Ppid()
-			c.info.Exe, _ = p.Exe()
-			c.info.Cmdline, _ = p.Cmdline()
-			c.info.User, _ = p.Username()
-			if isGenericRuntime(c.info.Name) {
-				c.info.Cwd, _ = p.Cwd() // to resolve "python agent.py" to a real file
-			}
+			c = cachedProc{createTime: ct, info: procInfoOf(p)}
 			if env, err := p.Environ(); err == nil {
 				c.envLLM = llmEnvValues(env, cat.LLMEnvVars)
 				c.envRead = true
@@ -837,6 +853,59 @@ func (w *Watcher) StoredStatus(fp string) (string, error) {
 
 // OnChange registers a callback fired when the running set, a verdict or
 // a sanction status changes.
+// OnExec registers a callback for every program start, called on the event
+// goroutine (keep it quick). Nothing calls it where exec events are not
+// available (see ExecEvents).
+func (w *Watcher) OnExec(cb func(pid int32)) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.execCbs = append(w.execCbs, cb)
+}
+
+// ExecEvents reports whether kernel exec events are in use (nil) or why
+// not; without them, starts are seen by sampling every 0.5 s and scans.
+func (w *Watcher) ExecEvents() error {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.execErr
+}
+
+// handleExec counts the start for the agent-loop signal and passes it on.
+func (w *Watcher) handleExec(pid int32, p fastProc, ok bool) {
+	w.mu.RLock()
+	cat, cbs := w.catalog, w.execCbs
+	w.mu.RUnlock()
+	if ok && cat != nil {
+		w.spawns.recordExec(p, time.Now(),
+			func(n string) bool { return cat.tools[n] },
+			func(n string) bool { return cat.shells[n] },
+			readFastProc)
+	}
+	for _, cb := range cbs {
+		cb(pid)
+	}
+}
+
+// Identify returns the fingerprint pid would be listed under and its start
+// time, from that one process (no scan).
+func (w *Watcher) Identify(pid int32) (fp string, start int64, ok bool) {
+	w.mu.RLock()
+	cat := w.catalog
+	w.mu.RUnlock()
+	if cat == nil {
+		return "", 0, false
+	}
+	p, err := process.NewProcess(pid)
+	if err != nil {
+		return "", 0, false
+	}
+	info := procInfoOf(p)
+	if info.Name == "" {
+		return "", 0, false
+	}
+	return cat.Fingerprint(info), info.Start, true
+}
+
 func (w *Watcher) OnChange(cb func()) {
 	w.mu.Lock()
 	defer w.mu.Unlock()

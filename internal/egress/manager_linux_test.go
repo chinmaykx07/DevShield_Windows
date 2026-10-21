@@ -153,10 +153,11 @@ func TestCanonRulesMatchRealNftListing(t *testing.T) {
 		t.Fatalf("rendered and listed differ:\n%v\n%v", want, have)
 	}
 	for _, edit := range [][2]string{
-		{`oifname "wg0" accept`, `oifname "eth0" accept`}, // tunnel swapped
-		{"203.0.113.5", "203.0.113.6"},                    // endpoint moved
-		{"meta skuid 65534", "meta skuid 0"},              // allowed user changed
-		{"devshield lockdown: everything else\"", "x\""},  // comment is part of the rule too
+		{`oifname "wg0" accept`, `oifname "eth0" accept`},            // tunnel swapped
+		{"203.0.113.5", "203.0.113.6"},                               // endpoint moved
+		{"meta skuid 65534", "meta skuid 0"},                         // allowed user changed
+		{"devshield lockdown: everything else\"", "x\""},             // comment is part of the rule too
+		{"ct original proto-dst 22 ", "ct original proto-dst 8000 "}, // reply port widened
 	} {
 		tampered := strings.Replace(string(l), edit[0], edit[1], 1)
 		if tampered == string(l) {
@@ -520,5 +521,69 @@ func TestSaveFailureSaysChangeIsInForce(t *testing.T) {
 	}
 	if m.Status().Lockdown == nil || !strings.Contains(nft.last(), "chain egress") {
 		t.Fatal("status no longer matches the kernel")
+	}
+}
+
+// fixturePolicy uses every kind of rule DevShield renders. testdata/ holds
+// its rendering and how real nft lists it back; regenerate both with
+//
+//	DEVSHIELD_WRITE_FIXTURE=1 go test -run TestWriteFixture ./internal/egress/
+//
+// then load rendered.nft into nft (with both groups present) and save
+// "nft list table inet devshield" as listed-by-nft-<version>.nft.
+var fixturePolicy = Policy{
+	Quarantine: true, CgroupPath: QuarantineCgroup, AllowedPath: AllowedCgroup,
+	KillFlows: []Flow{
+		{Proto: "tcp", LocalIP: "10.0.0.2", LocalPort: 51000, RemoteIP: "2.2.2.2", RemotePort: 443},
+		{Proto: "udp", LocalPort: 5353},
+	},
+	Lockdown: &Lockdown{Interfaces: []string{"wg0"}, Endpoints: []string{"203.0.113.5:51820/udp", "[2001:db8::1]:443"},
+		Users: []int{65534}, AllowLAN: true, Inbound: []string{"22/tcp", "53/udp"}},
+	BlockDoH: true,
+}
+
+func TestWriteFixture(t *testing.T) {
+	if os.Getenv("DEVSHIELD_WRITE_FIXTURE") == "" {
+		t.Skip("set DEVSHIELD_WRITE_FIXTURE=1 to regenerate testdata/rendered.nft")
+	}
+	s, err := Render(fixturePolicy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s = strings.TrimPrefix(s, "table inet "+TableName+"\ndelete table inet "+TableName+"\n")
+	if err := os.WriteFile("testdata/rendered.nft", []byte(s), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The fixture must still be what Render produces, or the comparison with
+// real nft output proves nothing about today's rules.
+func TestFixtureIsCurrentRendering(t *testing.T) {
+	s, err := Render(fixturePolicy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, _ := os.ReadFile("testdata/rendered.nft")
+	if strings.TrimPrefix(s, "table inet "+TableName+"\ndelete table inet "+TableName+"\n") != string(r) {
+		t.Fatal("testdata/rendered.nft is stale: regenerate it (see fixturePolicy)")
+	}
+}
+
+// The encrypted-DNS block survives a restart and restore-all ends it.
+func TestBlockDoHPersistsAndResets(t *testing.T) {
+	nft, dir := &fakeNft{}, t.TempDir()
+	m := newTestManager(t, nft, dir)
+	if err := m.SetBlockDoH(true); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(nft.last(), "th dport 853") {
+		t.Fatal("rules not loaded")
+	}
+	m2 := newTestManager(t, nft, dir) // daemon restart / boot
+	if !m2.BlockingDoH() || !m2.Status().BlockDoH {
+		t.Fatal("block lost on restart")
+	}
+	if did, err := m2.Reset(); err != nil || !slices.Contains(did, "encrypted-DNS blocking ended") || m2.BlockingDoH() || strings.Contains(nft.last(), "th dport 853") {
+		t.Fatalf("reset: %v %v\n%s", did, err, nft.last())
 	}
 }

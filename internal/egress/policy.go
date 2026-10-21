@@ -51,6 +51,12 @@ type Lockdown struct {
 	Users      []int    `json:"users,omitempty"`      // uids allowed out directly (e.g. the tor daemon user)
 	AllowLAN   bool     `json:"allow_lan"`            // private/link-local ranges
 	NoReplies  bool     `json:"no_replies,omitempty"` // strict: also block replies to inbound connections (breaks SSH into this machine)
+	// Inbound lists the local services ("22/tcp") whose replies to
+	// connections made TO this machine may leave; "all" allows every
+	// reply. Empty = DefaultInbound. Replies to other inbound connections
+	// are dropped: a program serving on another port can't answer
+	// whoever connects to it from outside.
+	Inbound []string `json:"inbound,omitempty"`
 	// OnlyAllowed: no tunnel or user at all — only allowed agents go out.
 	OnlyAllowed bool `json:"only_allowed,omitempty"`
 }
@@ -123,10 +129,15 @@ type Policy struct {
 	AllowedPath string `json:"-"`
 	// SkipLoopback is for tests only: lockdown normally always allows lo.
 	SkipLoopback bool `json:"-"`
+	// BlockDoH drops DNS over TLS/QUIC (port 853) and HTTPS to the
+	// well-known public DoH resolvers, for every program.
+	BlockDoH bool `json:"-"`
 }
 
 // Empty reports whether the policy needs no rules at all.
-func (p Policy) Empty() bool { return !p.Quarantine && p.Lockdown == nil && len(p.KillFlows) == 0 }
+func (p Policy) Empty() bool {
+	return !p.Quarantine && p.Lockdown == nil && len(p.KillFlows) == 0 && !p.BlockDoH
+}
 
 // Endpoint is a parsed "ip:port/proto".
 type Endpoint struct {
@@ -176,6 +187,57 @@ func validIface(name string) bool {
 }
 
 // Validate checks a lockdown configuration before anything is applied.
+// DefaultInbound keeps SSH into this machine working during a lockdown.
+var DefaultInbound = []string{"22/tcp"}
+
+// Service is one local port whose replies may leave.
+type Service struct {
+	Port  int
+	Proto string // tcp | udp
+}
+
+// ParseService reads "22/tcp", "53/udp" or "22" (tcp).
+func ParseService(s string) (Service, error) {
+	port, proto, _ := strings.Cut(strings.ToLower(strings.TrimSpace(s)), "/")
+	if proto == "" {
+		proto = "tcp"
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil || n < 1 || n > 65535 || (proto != "tcp" && proto != "udp") {
+		return Service{}, fmt.Errorf("invalid inbound service %q (want PORT/tcp or PORT/udp, or all)", s)
+	}
+	return Service{Port: n, Proto: proto}, nil
+}
+
+// ReplyServices says which replies to inbound connections may leave:
+// all of them, or those of the listed services (none with --strict).
+func (l *Lockdown) ReplyServices() (all bool, svcs []Service) {
+	if l.NoReplies {
+		return false, nil
+	}
+	in := l.Inbound
+	if len(in) == 0 {
+		in = DefaultInbound
+	}
+	seen := map[Service]bool{}
+	for _, s := range in {
+		if strings.EqualFold(strings.TrimSpace(s), "all") {
+			return true, nil
+		}
+		if sv, err := ParseService(s); err == nil && !seen[sv] {
+			seen[sv] = true
+			svcs = append(svcs, sv)
+		}
+	}
+	sort.Slice(svcs, func(i, j int) bool {
+		if svcs[i].Proto != svcs[j].Proto {
+			return svcs[i].Proto < svcs[j].Proto
+		}
+		return svcs[i].Port < svcs[j].Port
+	})
+	return false, svcs
+}
+
 func (l *Lockdown) Validate() error {
 	if len(l.Interfaces) == 0 && len(l.Users) == 0 && !l.OnlyAllowed {
 		return fmt.Errorf("lockdown needs at least one tunnel interface (--via) or allowed user (--user), or --only-allowed; otherwise nothing could reach the internet")
@@ -194,6 +256,17 @@ func (l *Lockdown) Validate() error {
 		if u < 0 {
 			return fmt.Errorf("invalid uid %d", u)
 		}
+	}
+	for _, s := range l.Inbound {
+		if strings.EqualFold(strings.TrimSpace(s), "all") {
+			continue
+		}
+		if _, err := ParseService(s); err != nil {
+			return err
+		}
+	}
+	if l.NoReplies && len(l.Inbound) > 0 {
+		return fmt.Errorf("--strict blocks all replies to inbound connections; it can't be combined with --inbound")
 	}
 	return nil
 }
@@ -249,15 +322,15 @@ func Render(p Policy) (string, error) {
 		fmt.Fprintf(&b, "\t\t%s counter drop comment \"quarantined socket\"\n", r)
 	}
 
+	if p.BlockDoH {
+		writeDoH(&b) // before the lockdown's accepts: also through the tunnel
+	}
+
 	if l := p.Lockdown; l != nil {
 		if !p.SkipLoopback {
 			b.WriteString("\t\toifname \"lo\" accept\n")
 		}
-		if !l.NoReplies {
-			// Answers to connections someone else opened (e.g. SSH into this
-			// machine). This never allows a NEW outbound connection.
-			b.WriteString("\t\tct direction reply accept comment \"replies to inbound connections\"\n")
-		}
+		writeReplies(&b, l)
 		if p.AllowedPath != "" {
 			if err := checkGroupPath(p.AllowedPath, AllowedCgroup); err != nil {
 				return "", err
@@ -299,8 +372,9 @@ func Render(p Policy) (string, error) {
 		// libvirt, network namespaces) never passes the output hook: without
 		// this chain it would leave outside the tunnel.
 		b.WriteString("\tchain forward {\n\t\ttype filter hook forward priority filter; policy accept;\n")
-		if !l.NoReplies {
-			b.WriteString("\t\tct direction reply accept comment \"replies to inbound connections\"\n")
+		writeReplies(&b, l)
+		if p.BlockDoH {
+			writeDoH(&b)
 		}
 		ifaces := append([]string(nil), l.Interfaces...)
 		sort.Strings(ifaces)
@@ -313,6 +387,30 @@ func Render(p Policy) (string, error) {
 	}
 	b.WriteString("}\n")
 	return b.String(), nil
+}
+
+// writeDoH drops encrypted DNS that would bypass /etc/hosts: DNS over TLS
+// and over QUIC (port 853) to anyone, and HTTPS to the public DoH
+// resolvers in DoHResolversV4/V6.
+func writeDoH(b *strings.Builder) {
+	b.WriteString("\t\tmeta l4proto { tcp, udp } th dport 853 counter drop comment \"devshield: dns over tls/quic\"\n")
+	fmt.Fprintf(b, "\t\tip daddr { %s } meta l4proto { tcp, udp } th dport 443 counter drop comment \"devshield: public doh resolvers\"\n", strings.Join(DoHResolversV4, ", "))
+	fmt.Fprintf(b, "\t\tip6 daddr { %s } meta l4proto { tcp, udp } th dport 443 counter drop comment \"devshield: public doh resolvers\"\n", strings.Join(DoHResolversV6, ", "))
+}
+
+// writeReplies lets out answers to connections someone else opened (e.g.
+// SSH into this machine), only for the services named: "ct original
+// proto-dst" is the local port the connection was made to. This never
+// allows a NEW outbound connection.
+func writeReplies(b *strings.Builder, l *Lockdown) {
+	all, svcs := l.ReplyServices()
+	if all {
+		b.WriteString("\t\tct direction reply accept comment \"replies to inbound connections\"\n")
+		return
+	}
+	for _, s := range svcs {
+		fmt.Fprintf(b, "\t\tct direction reply meta l4proto %s ct original proto-dst %d accept comment \"replies to inbound %d/%s\"\n", s.Proto, s.Port, s.Port, s.Proto)
+	}
 }
 
 // writeLAN allows the local network when asked, but never name lookups:

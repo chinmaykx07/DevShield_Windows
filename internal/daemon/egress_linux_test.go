@@ -6,11 +6,14 @@ import (
 	"database/sql"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/chinmaykx07/DevShield_Windows/internal/agentwatch"
 	"github.com/chinmaykx07/DevShield_Windows/internal/auditlog"
@@ -182,5 +185,96 @@ func TestLostEventsAreReported(t *testing.T) {
 	}
 	if n := d.status().LostEvents; n != 1 {
 		t.Fatalf("status LostEvents = %d", n)
+	}
+}
+
+// With the sinkhole on, block-doh adds the DoH resolvers' names to it (and
+// takes them out again); with it off, it says that browsers are not stopped.
+func TestBlockDoHKeepsSinkholeInStep(t *testing.T) {
+	d := bareDaemon(t)
+	withAllowedAgent(t, d) // any egress manager on fake nft
+	root := t.TempDir()
+	os.MkdirAll(filepath.Join(root, "etc"), 0o755)
+	os.WriteFile(filepath.Join(root, "etc/hosts"), []byte("127.0.0.1 localhost\n"), 0o644)
+	os.WriteFile(filepath.Join(root, "etc/nsswitch.conf"), []byte("hosts: files dns\n"), 0o644)
+	d.cfg.SysRoot = root
+	hostsFile := func() string { b, _ := os.ReadFile(filepath.Join(root, "etc/hosts")); return string(b) }
+	root0 := ipc.Peer{UID: 0}
+
+	if r := d.setBlockDoH("on", root0); !r.OK || !strings.Contains(r.Note, "sinkhole is off") || !r.Egress.BlockDoH {
+		t.Fatalf("on with sinkhole off: %+v", r)
+	}
+	if r := d.setSinkhole("on", root0); !r.OK || !strings.Contains(hostsFile(), "dns.google") {
+		t.Fatalf("sinkhole on did not include the DoH names:\n%s", hostsFile())
+	}
+	if r := d.setBlockDoH("off", root0); !r.OK || strings.Contains(hostsFile(), "dns.google") || !strings.Contains(hostsFile(), "metrics.ubuntu.com") {
+		t.Fatalf("block-doh off left the DoH names or dropped the telemetry ones:\n%s", hostsFile())
+	}
+	if r := d.setBlockDoH("on", root0); !r.OK || r.Note != "" || !strings.Contains(hostsFile(), "dns.google") {
+		t.Fatalf("on with sinkhole on: note %q\n%s", r.Note, hostsFile())
+	}
+}
+
+// End to end in this (host) network namespace, where the kernel's process
+// events exist: a blocked program that starts again is quarantined from
+// its exec event alone, long before any scan (this daemon never scans).
+func TestBlockedProgramIsCaughtAtExec(t *testing.T) {
+	d := bareDaemon(t)
+	if os.Geteuid() != 0 {
+		t.Skip("needs root (proc connector)")
+	}
+	cg := t.TempDir()
+	var mu sync.Mutex
+	last := ""
+	m, err := egress.New(egress.Config{
+		StateDir: t.TempDir(), CgroupRoot: cg, NftBase: cg, // real /proc, fake cgroup tree
+		Nft: func(s string, check bool) error {
+			if !check {
+				mu.Lock()
+				last = s
+				mu.Unlock()
+			}
+			return nil
+		},
+		NftList: func() (string, error) { mu.Lock(); defer mu.Unlock(); return last, nil },
+		Emit:    func(a, det, s string) { d.eventFrom(a, det, s, "egress") },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fp := d.watcher.Catalog().Fingerprint(agentwatch.ProcInfo{Name: "sleep", Exe: "/usr/bin/sleep", Cmdline: "sleep 30"})
+	if _, _, err := m.Block(fp, "abcd1234", "test program", nil); err != nil { // blocked while not running
+		t.Fatal(err)
+	}
+	d.egress = m
+	d.watcher.OnExec(d.execStarted)
+	d.watcher.Start()
+	if err := d.watcher.ExecEvents(); err != nil {
+		t.Skipf("no kernel exec events here: %v", err)
+	}
+	cmd := exec.Command("/usr/bin/sleep", "30")
+	began := time.Now()
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cmd.Process.Kill(); cmd.Wait() })
+	want := strconv.Itoa(cmd.Process.Pid)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		got, _ := os.ReadFile(filepath.Join(cg, egress.QuarantineCgroup, "cgroup.procs"))
+		if strings.Contains(string(got), want) {
+			t.Logf("quarantined %v after start", time.Since(began).Round(time.Millisecond))
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("pid %s not quarantined within 2 s of starting (events: %v)", want, actions(t, d))
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	for !slices.Contains(actions(t, d), "AGENT_REQUARANTINED") {
+		if time.Now().After(deadline.Add(time.Second)) {
+			t.Fatalf("not logged: %v", actions(t, d))
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

@@ -14,7 +14,7 @@ There are two variants, at different stages:
 |---|---|---|
 | AI agent detection (Agent Watch) | ✅ unit-tested; live-tested in namespaces (a catalogued agent, and an uncatalogued program found by behaviour alone: listening on a model port) | ⚠ compiles, **never run on Windows** |
 | Block one agent's network / lockdown (tunnel, Tor, chosen users) | ✅ live-tested against the real kernel in namespaces (`test/linux-live/`); not yet with a real VPN/Tor or under systemd | — not implemented |
-| Telemetry sinkhole (hosts file) | ✅ unit-tested; restore checked live on a simulated tree | ⚠ script exists, not tested on Windows |
+| Telemetry sinkhole (hosts file), plus optional encrypted-DNS block (`block-doh`) | ✅ sinkhole live-tested on a real resolver (private copy of /etc/hosts); `block-doh` live-tested in a namespace | ⚠ script exists, not tested on Windows |
 | LAN privacy (LLMNR/mDNS, MAC randomisation) | ⚠ tested on a simulated system only | ⚠ in `tor_hardening.ps1`, not tested |
 | Thermal profiles | ⚠ tested on simulated kernel layouts, **not on real hardware** | ⚠ scripts exist, not tested on Windows |
 | Network monitor | ✅ live-tested in a namespace (TCP only) | ❌ crashes in its main loop; unknown-process alerts never fire (C5) |

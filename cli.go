@@ -46,6 +46,9 @@ Usage:
   sudo devshield profile <name>   silent | gaming | dev | off (off = original settings)
   devshield sinkhole              telemetry sinkhole status and what it blocks
   sudo devshield sinkhole on|off  block / unblock telemetry domains in /etc/hosts
+  sudo devshield block-doh on|off drop encrypted DNS that bypasses /etc/hosts: DNS over
+                                  TLS/QUIC (port 853) and HTTPS to well-known public DoH
+                                  resolvers; with the sinkhole on, also their host names
   devshield net [--all] [--json]  which program talks to whom (telemetry, LLM APIs, …);
                                   --all includes loopback and local-network connections
   devshield lan-privacy [--json]  what this machine reveals on local networks
@@ -59,7 +62,8 @@ Usage:
                                   automatically if it turns risky or loses its sanction)
   sudo devshield disallow <id>
   sudo devshield lockdown on [--via IFACE]... [--endpoint IP:PORT/PROTO]...
-                    [--user NAME]... [--tor] [--only-allowed] [--lan] [--strict]
+                    [--user NAME]... [--tor] [--only-allowed] [--lan]
+                    [--inbound PORT/PROTO|all]... [--strict]
                     [--confirm-within 2m]
                                   nothing leaves except through the interfaces, to the
                                   endpoints, as the users and by the allowed agents you
@@ -131,6 +135,23 @@ func runCLI(args []string, stdout, stderr io.Writer) int {
 			return cliThermal(socket, stdout, stderr)
 		}
 		return cliProfile(cargs[0], socket, stdout, stderr)
+	case "block-doh":
+		if len(cargs) != 1 || (cargs[0] != "on" && cargs[0] != "off") {
+			fmt.Fprintln(stderr, "usage: sudo devshield block-doh on|off")
+			return 2
+		}
+		resp, ok := call(socket, ipc.Request{Op: "block-doh", Profile: cargs[0]}, stderr)
+		if !ok {
+			return 1
+		}
+		if resp.Note != "" {
+			fmt.Fprintf(stdout, "⚠ done, but %s\n\n", resp.Note)
+		}
+		printEgress(resp.Egress, stdout)
+		if resp.Note != "" {
+			return 3
+		}
+		return 0
 	case "sinkhole":
 		op, mode := "privacy", ""
 		if len(cargs) > 0 {
@@ -530,14 +551,15 @@ func cliLockdown(args []string, socket string, stdout, stderr io.Writer) int {
 	if mode == "on" {
 		fs := flag.NewFlagSet("lockdown on", flag.ContinueOnError)
 		fs.SetOutput(stderr)
-		var via, eps, users multiFlag
+		var via, eps, users, inbound multiFlag
 		fs.Var(&via, "via", "tunnel interface allowed out (repeatable), e.g. wg0")
 		fs.Var(&eps, "endpoint", "tunnel server IP:PORT/PROTO reachable directly (repeatable)")
 		fs.Var(&users, "user", "user (name or uid) allowed out directly, e.g. a VPN client's account (repeatable)")
 		tor := fs.Bool("tor", false, "allow the Tor daemon's user (programs then reach the internet only through Tor)")
 		only := fs.Bool("only-allowed", false, "no tunnel at all: only agents you allowed (devshield allow) may go out")
 		lan := fs.Bool("lan", false, "also allow the local network (printers, NAS); DNS still must use the tunnel")
-		strict := fs.Bool("strict", false, "also block replies to inbound connections (breaks SSH into this machine)")
+		fs.Var(&inbound, "inbound", "local service whose replies to connections made TO this machine may leave: PORT/tcp, PORT/udp, or all (repeatable; default 22/tcp, SSH)")
+		strict := fs.Bool("strict", false, "block replies to every inbound connection, SSH included")
 		confirm := fs.Duration("confirm-within", 0, "revert automatically unless 'devshield lockdown confirm' is run in time")
 		if err := fs.Parse(args[1:]); err != nil {
 			return 2
@@ -547,7 +569,7 @@ func cliLockdown(args []string, socket string, stdout, stderr io.Writer) int {
 			return 2
 		}
 		req.Lockdown = &ipc.LockdownRequest{Via: via, Endpoints: eps, Users: users, Tor: *tor, OnlyAllowed: *only,
-			LAN: *lan, Strict: *strict, ConfirmSec: int(math.Ceil(confirm.Seconds()))}
+			LAN: *lan, Strict: *strict, Inbound: inbound, ConfirmSec: int(math.Ceil(confirm.Seconds()))}
 	}
 	resp, ok := call(socket, req, stderr)
 	if !ok {
@@ -600,8 +622,15 @@ func printEgress(e *egress.Status, stdout io.Writer) {
 		if l.AllowLAN {
 			fmt.Fprintln(stdout, "  · the local network (except DNS)")
 		}
-		if !l.NoReplies {
-			fmt.Fprintln(stdout, "  · replies to connections made TO this machine (e.g. SSH); --strict blocks them")
+		switch all, svcs := l.ReplyServices(); {
+		case all:
+			fmt.Fprintln(stdout, "  · replies to every connection made TO this machine (--inbound all)")
+		case len(svcs) > 0:
+			var names []string
+			for _, s := range svcs {
+				names = append(names, fmt.Sprintf("%d/%s", s.Port, s.Proto))
+			}
+			fmt.Fprintf(stdout, "  · replies to connections made TO this machine on %s only (--inbound; --strict blocks them)\n", strings.Join(names, ", "))
 		}
 		if !e.ConfirmBy.IsZero() {
 			fmt.Fprintf(stdout, "  ⏳ reverts at %s unless you run: sudo devshield lockdown confirm\n", e.ConfirmBy.Local().Format("15:04:05"))
@@ -626,6 +655,11 @@ func printEgress(e *egress.Status, stdout io.Writer) {
 		for _, b := range e.Allowed {
 			fmt.Fprintf(stdout, "  ✅ %-9s %-30s since %s\n", b.ID, truncate(b.Name, 30), b.Since.Local().Format("2006-01-02 15:04"))
 		}
+	}
+	if e.BlockDoH {
+		fmt.Fprintln(stdout, "Encrypted DNS (DoH/DoT): blocked to the well-known public resolvers and port 853 (sudo devshield block-doh off)")
+	} else {
+		fmt.Fprintln(stdout, "Encrypted DNS (DoH/DoT): not blocked (sudo devshield block-doh on)")
 	}
 	if !e.CgroupV2 {
 		fmt.Fprintln(stdout, "  note: cgroup v2 is not mounted, so per-agent blocking is unavailable here")

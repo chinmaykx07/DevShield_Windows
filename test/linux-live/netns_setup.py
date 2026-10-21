@@ -1,6 +1,7 @@
 # Inside a fresh network namespace: bring up loopback and create a
-# persistent TUN interface "dstest0" (10.9.9.1/24). Packets sent to
-# 10.9.9.2 leave through it, so they pass the OUTPUT hook like real
+# persistent TUN interface "dstest0" (10.9.9.1/24) carrying the default
+# route, so sends to public addresses (e.g. a DoH resolver) have a way
+# out to be blocked. Packets sent to 10.9.9.2 leave through it, so they pass the OUTPUT hook like real
 # traffic; a locally dropped UDP send returns EPERM. Uses raw rtnetlink
 # and ioctls because test machines often lack the ip(8) tool.
 import fcntl
@@ -9,7 +10,7 @@ import socket
 import struct
 
 NLM_F_REQUEST, NLM_F_ACK, NLM_F_CREATE, NLM_F_EXCL = 1, 4, 0x400, 0x200
-RTM_NEWADDR = 20
+RTM_NEWADDR, RTM_NEWROUTE = 20, 24
 SIOCSIFFLAGS, IFF_UP, IFF_RUNNING = 0x8914, 0x1, 0x40
 TUNSETIFF, TUNSETPERSIST, IFF_TUN, IFF_NO_PI = 0x400454CA, 0x400454CB, 0x0001, 0x1000
 
@@ -40,3 +41,7 @@ addr = socket.inet_aton("10.9.9.1")
 netlink(nl, RTM_NEWADDR, NLM_F_CREATE | NLM_F_EXCL,
         struct.pack("BBBBI", socket.AF_INET, 24, 0, 0, socket.if_nametoindex("dstest0")) + rta(1, addr) + rta(2, addr))
 up(b"dstest0")
+# default route: dev dstest0 (main table, link scope, unicast)
+netlink(nl, RTM_NEWROUTE, NLM_F_CREATE | NLM_F_EXCL,
+        struct.pack("BBBBBBBBI", socket.AF_INET, 0, 0, 0, 254, 3, 253, 1, 0)
+        + rta(4, struct.pack("I", socket.if_nametoindex("dstest0"))))

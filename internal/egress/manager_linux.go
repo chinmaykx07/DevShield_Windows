@@ -61,6 +61,7 @@ type state struct {
 	Blocked  map[string]*Member `json:"blocked"`           // by agent fingerprint
 	Allowed  map[string]*Member `json:"allowed,omitempty"` // by agent fingerprint
 	Lockdown *Lockdown          `json:"lockdown,omitempty"`
+	BlockDoH bool               `json:"block_doh,omitempty"` // see Policy.BlockDoH
 }
 
 // Manager owns DevShield's nftables table and quarantine cgroup.
@@ -87,6 +88,7 @@ type Status struct {
 	CgroupV2         bool        `json:"cgroup_v2"`
 	RulesLoaded      bool        `json:"rules_loaded"`
 	Unverifiable     bool        `json:"rules_unverifiable,omitempty"` // loaded, unchanged since, but not comparable with DevShield's script
+	BlockDoH         bool        `json:"block_doh,omitempty"`          // encrypted DNS to public resolvers is dropped
 	Blocked          []BlockInfo `json:"blocked,omitempty"`
 	Lockdown         *Lockdown   `json:"lockdown,omitempty"`
 	ConfirmBy        time.Time   `json:"confirm_by,omitempty"`
@@ -226,7 +228,7 @@ func fileExists(paths ...string) bool {
 // policy builds the ruleset for the current state. The quarantine rule is
 // present whenever the group exists, so leftover members stay cut off.
 func (m *Manager) policy() Policy {
-	p := Policy{Lockdown: m.st.Lockdown}
+	p := Policy{Lockdown: m.st.Lockdown, BlockDoH: m.st.BlockDoH}
 	if m.cgRoot != "" {
 		if _, err := os.Stat(m.quarantineDir()); err == nil {
 			p.Quarantine = true
@@ -626,6 +628,37 @@ func (m *Manager) moveTo(pid int, origin string) bool {
 	return true
 }
 
+// BlockingDoH reports whether the encrypted-DNS block is on (saved state).
+func (m *Manager) BlockingDoH() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.st.BlockDoH
+}
+
+// SetBlockDoH turns the encrypted-DNS block on or off.
+func (m *Manager) SetBlockDoH(on bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.corrupt != nil {
+		return m.corrupt
+	}
+	prev := m.st.BlockDoH
+	m.st.BlockDoH = on
+	if err := m.apply(); err != nil {
+		m.st.BlockDoH = prev // nft is atomic: nothing changed
+		return err
+	}
+	return m.saveApplied()
+}
+
+// HasMembers reports whether any agent is blocked or allowed (callers skip
+// per-exec work otherwise).
+func (m *Manager) HasMembers() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.st.Blocked)+len(m.st.Allowed) > 0
+}
+
 // Reconcile re-quarantines blocked agents whose processes (re)appeared
 // outside the group — e.g. the agent was restarted. running maps agent
 // fingerprint → current pids. It returns the ids that were re-captured.
@@ -900,10 +933,14 @@ func (m *Manager) Reset() ([]string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var did []string
-	cur := m.st.Lockdown
+	cur, curDoH := m.st.Lockdown, m.st.BlockDoH
 	if m.st.Lockdown != nil {
 		m.st.Lockdown = nil
 		did = append(did, "lockdown ended")
+	}
+	if m.st.BlockDoH {
+		m.st.BlockDoH = false
+		did = append(did, "encrypted-DNS blocking ended")
 	}
 	for fp, b := range m.st.Blocked {
 		msg := "unblocked " + b.ID
@@ -940,7 +977,7 @@ func (m *Manager) Reset() ([]string, error) {
 		}
 	}
 	if err := m.apply(); err != nil {
-		m.st.Lockdown = cur // the kernel still enforces it
+		m.st.Lockdown, m.st.BlockDoH = cur, curDoH // the kernel still enforces them
 		return did, err
 	}
 	if m.pending != nil {
@@ -967,7 +1004,7 @@ func (m *Manager) Reset() ([]string, error) {
 func (m *Manager) Status() Status {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	st := Status{CgroupV2: m.cgRoot != "", Lockdown: m.st.Lockdown}
+	st := Status{CgroupV2: m.cgRoot != "", Lockdown: m.st.Lockdown, BlockDoH: m.st.BlockDoH}
 	st.RulesLoaded, st.Unverifiable = m.rulesState()
 	if m.corrupt != nil {
 		st.Problem, st.RulesLoaded, st.Unverifiable = m.corrupt.Error(), false, false

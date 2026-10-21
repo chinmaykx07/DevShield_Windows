@@ -2,7 +2,7 @@
 # "restore-all" live check, called by run.sh inside its namespaces:
 #   restore_all.sh BIN WORKDIR CGROUP_MOUNT
 # Turns on everything DevShield can change (thermal profile, sinkhole, LAN
-# privacy, lockdown, an allowed agent) — the thermal, hosts and LAN-privacy
+# privacy, lockdown, encrypted-DNS block, an allowed agent) — the thermal, hosts and LAN-privacy
 # parts on a simulated /sys and /etc tree, lockdown and the agent on the
 # real kernel inside run.sh's namespaces — runs restore-all, and checks
 # every value is back to the original. Then blocks the agent and checks a
@@ -68,9 +68,11 @@ $DS sinkhole on >/dev/null
 $DS lan-privacy on >/dev/null
 $DS lanprivacy-noop >/dev/null 2>&1 # unknown command: must change nothing
 $DS lockdown on --via wg0 >/dev/null
+$DS block-doh on >/dev/null
 snapshot $D/during
 check "everything was switched on (files changed)" "$(diff $D/before $D/during | grep -c '^>' | awk '{print ($1 > 5)}')" 1
 check "lockdown active" "$(python3 $HERE/fixtures.py probe)" EPERM
+check "DoH blocked" "$(python3 $HERE/fixtures.py udpsend 1.1.1.1 443)" EPERM
 check "allowed agent goes out during lockdown" "$(lastudp)" ok
 check "allowed agent is in the allowed group" "$(agcg)" /devshield-allowed
 
@@ -84,6 +86,7 @@ snapshot $D/after
 check "every value back to the original" "$(diff $D/before $D/after | wc -l | tr -d ' ')" 0
 check "/etc/hosts byte-identical" "$(cmp -s $D/hosts.orig $R/etc/hosts && echo same)" same
 check "network open again" "$(python3 $HERE/fixtures.py probe)" ok
+check "DoH resolvers reachable again" "$(python3 $HERE/fixtures.py udpsend 1.1.1.1 443)" ok
 check "DevShield table removed" "$(nft list table inet devshield >/dev/null 2>&1 && echo present || echo gone)" gone
 check "allowed agent back in its own cgroup" "$(agcg)" "$ORIGCG"
 check "allowed group removed" "$([ -d "$CG/devshield-allowed" ] && echo present || echo gone)" gone

@@ -12,11 +12,14 @@ package agentwatch
 import (
 	"bufio"
 	"bytes"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/chinmaykx07/DevShield_Windows/internal/procevents"
 )
 
 // procNameCache: PID → (ppid, name) for PIDs already read. Shared by
@@ -239,3 +242,30 @@ func homeDirs(root string) []string {
 	addHome("/root")
 	return out
 }
+
+// startExecEvents subscribes to kernel exec events, so every program start
+// is seen as it happens (the 0.5 s sampling keeps running as a backup).
+func (w *Watcher) startExecEvents() error {
+	l, err := procevents.Open()
+	if err != nil {
+		return err
+	}
+	w.loops.Add(1)
+	go func() {
+		defer w.loops.Done()
+		err := l.Run(w.stopCh, func(pid int32) {
+			p, ok := readProcStat(pid) // gone already if it exited at once
+			w.handleExec(pid, p, ok)
+		})
+		if err != nil {
+			w.mu.Lock()
+			w.execErr = err
+			w.mu.Unlock()
+			log.Printf("agentwatch: exec events stopped, sampling only: %v", err)
+		}
+	}()
+	return nil
+}
+
+// readFastProc reads one process's name, parent and terminal.
+func readFastProc(pid int32) (fastProc, bool) { return readProcStat(pid) }

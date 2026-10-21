@@ -46,5 +46,15 @@ building it.
   the "before lockdown" control flaky. A forward-chain drop still drops
   every copy.
 
+- Replies to inbound connections are probed by injecting a TCP SYN from a
+  "remote" address into the test interface (`reply_probe.py`) and watching
+  whether the kernel's SYN-ACK comes back out.
+- Kernel exec events (the proc connector) exist only in the machine's
+  initial network namespace, so they are unavailable in here: the checks
+  that a restarted blocked agent is cut off within ~2 s print SKIP, with
+  the reason. That path is tested end to end in the host namespace by
+  `go test ./internal/daemon -run TestBlockedProgramIsCaughtAtExec` (as
+  root).
+
 Not covered here: real WireGuard/Tor tunnels, running under systemd, and
 real hardware.

@@ -58,6 +58,7 @@ type LockdownRequest struct {
 	OnlyAllowed bool     `json:"only_allowed,omitempty"` // no tunnel: only allowed agents go out
 	LAN         bool     `json:"lan,omitempty"`
 	Strict      bool     `json:"strict,omitempty"`
+	Inbound     []string `json:"inbound,omitempty"` // services whose replies may leave ("22/tcp", "all")
 	ConfirmSec  int      `json:"confirm_sec,omitempty"`
 }
 

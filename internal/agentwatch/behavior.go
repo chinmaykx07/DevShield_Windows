@@ -91,20 +91,10 @@ func (t *spawnTracker) observe(procs []fastProc, now time.Time, isTool, isShell 
 
 	if t.primed {
 		for _, p := range procs {
-			name := strings.ToLower(p.Name)
-			if old, seen := t.known[p.PID]; (seen && strings.EqualFold(old.Name, p.Name)) || !isTool(name) {
+			if old, seen := t.known[p.PID]; (seen && strings.EqualFold(old.Name, p.Name)) || !isTool(strings.ToLower(p.Name)) {
 				continue
 			}
-			ev := spawnEvent{at: now, name: name}
-			ancestor := p.PPID
-			for hop := 0; hop < maxShellHops && ancestor != 0; hop++ {
-				t.spawned[ancestor] = append(t.spawned[ancestor], ev)
-				parent, ok := lookup(ancestor)
-				if !ok || !isShell(strings.ToLower(parent.Name)) || parent.Interactive {
-					break
-				}
-				ancestor = parent.PPID
-			}
+			t.credit(p, now, lookup, isShell)
 		}
 	}
 	// Remember processes that just exited for one more round, so the
@@ -132,6 +122,52 @@ func (t *spawnTracker) observe(procs []fastProc, now time.Time, isTool, isShell 
 			t.spawned[ppid] = kept
 		}
 	}
+}
+
+// credit records tool p as launched by its parent and, while that parent
+// is a non-interactive shell, by the shell's parent too (see observe).
+func (t *spawnTracker) credit(p fastProc, now time.Time, lookup func(int32) (fastProc, bool), isShell func(string) bool) {
+	ev := spawnEvent{at: now, name: strings.ToLower(p.Name)}
+	ancestor := p.PPID
+	for hop := 0; hop < maxShellHops && ancestor != 0; hop++ {
+		t.spawned[ancestor] = append(t.spawned[ancestor], ev)
+		parent, ok := lookup(ancestor)
+		if !ok || !isShell(strings.ToLower(parent.Name)) || parent.Interactive {
+			break
+		}
+		ancestor = parent.PPID
+	}
+}
+
+// recordExec counts a program start reported by a kernel exec event, so a
+// command that exits before the next sample is still seen. The process is
+// remembered under its new name, so the next sample doesn't count it again.
+// parent reads a process that is not in the last sample (nil: none).
+func (t *spawnTracker) recordExec(p fastProc, now time.Time, isTool, isShell func(string) bool, parent func(int32) (fastProc, bool)) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if !t.primed {
+		return // the first sample has not run: it would not count this either
+	}
+	if old, seen := t.known[p.PID]; seen && strings.EqualFold(old.Name, p.Name) {
+		return // already counted (e.g. the sample caught it first)
+	}
+	if isTool(strings.ToLower(p.Name)) {
+		lookup := func(pid int32) (fastProc, bool) {
+			if q, ok := t.known[pid]; ok {
+				return q, true
+			}
+			if q, ok := t.exited[pid]; ok {
+				return q, true
+			}
+			if parent != nil {
+				return parent(pid)
+			}
+			return fastProc{}, false
+		}
+		t.credit(p, now, lookup, isShell)
+	}
+	t.known[p.PID] = p
 }
 
 // recent returns the tool/shell names pid launched within the window.

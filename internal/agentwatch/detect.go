@@ -318,14 +318,12 @@ func (c *AgentCatalog) Classify(s Snapshot, llmIPs map[string]string) []Detectio
 			PID: p.PID, Start: p.Start, Exe: p.Exe, Cmdline: p.Cmdline, User: p.User, Target: target, Script: script,
 			AgentScore: score, Reasons: reasons,
 		}
+		d.Name = agentName(p, sig, target)
 		if sig != nil {
-			d.Name, d.Vendor, d.Kind, d.Known = sig.Name, sig.Vendor, sig.Kind, true
-			if sig.Kind == "mcp_server" && target != "" {
-				d.Name = "MCP server: " + filepath.Base(strings.ReplaceAll(target, `\`, "/"))
-			}
+			d.Vendor, d.Kind, d.Known = sig.Vendor, sig.Kind, true
 			d.Reasons = append([]string{"identified as " + sig.Name}, d.Reasons...)
 		} else {
-			d.Name, d.Kind = "Unknown AI agent ("+p.Name+")", "unknown"
+			d.Kind = "unknown"
 		}
 		d.Risks = c.rogueIndicators(p, s, b, sig == nil, alive)
 		out = append(out, d)
@@ -338,6 +336,29 @@ func (c *AgentCatalog) Classify(s Snapshot, llmIPs map[string]string) []Detectio
 		return out[i].Name < out[j].Name
 	})
 	return out
+}
+
+// agentName is the name an agent is listed (and fingerprinted) under.
+func agentName(p ProcInfo, sig *AgentSignature, target string) string {
+	if sig == nil {
+		return "Unknown AI agent (" + p.Name + ")"
+	}
+	if sig.Kind == "mcp_server" && target != "" {
+		return "MCP server: " + filepath.Base(strings.ReplaceAll(target, `\`, "/"))
+	}
+	return sig.Name
+}
+
+// Fingerprint is the fingerprint p would have if Classify listed it as an
+// agent (by catalog identity or by behaviour), computed from p alone so a
+// just-started process can be matched against blocked agents at once.
+// "" for processes Agent Watch never lists.
+func (c *AgentCatalog) Fingerprint(p ProcInfo) string {
+	if c.ignore[strings.ToLower(p.Name)] {
+		return ""
+	}
+	target, _ := launchTarget(p)
+	return AgentFingerprint(Detection{Name: agentName(p, c.Match(p), target), Exe: p.Exe, Target: target})
 }
 
 // agentScore measures how much a process BEHAVES like an AI agent. It

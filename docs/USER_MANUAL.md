@@ -121,7 +121,7 @@ Audit events: `AGENT_ROGUE_SUSPECT`, `AGENT_RISKY`, `AGENT_NEW`, `AGENT_UNKNOWN`
 - Agent Watch only alerts. To cut an agent off the network on Linux, use `sudo devshield block <ID>` (section 2b).
 - Without admin (or root) it can't fully inspect other users' or elevated processes.
 - On Windows it has never been run on a real machine.
-- Commands that finish in well under half a second may be missed, because the process list is sampled every 0.5 s. Event-based capture that catches every process is planned for the admin-mode phase.
+- **Linux:** every program start arrives as a kernel event (the "proc connector"; needs the daemon's root rights and the machine's own network namespace, which is how the service runs). In tests, 296–300 of 300 runs of `/bin/true` were caught; one that exits and is cleaned up before its event is handled can still be missed. Where the events are unavailable (inside a container's network namespace, say), the daemon logs `EXEC_EVENTS_UNAVAILABLE` and falls back to sampling. **Windows:** the process list is sampled every 0.5 s, so commands that finish faster may be missed.
 - Command lines are redacted (keys and tokens masked) before logging, and environment variable *values* are never stored.
 
 To recognise an agent the catalog doesn't know yet: on Linux, root can put a catalog in `/etc/devshield/agent_catalog.json`, which replaces the built-in one. On Windows there is deliberately no per-user override, because an agent running as you could edit it.
@@ -150,7 +150,7 @@ sudo devshield verify-log        # check the audit log's hash chain
   - `agents` exits 3 when a rogue or risky agent is running (`agents --json` always exits 0).
   - `verify-log` exits 3 only for a broken hash chain; a missing or unreadable log is 1.
   - `net` exits 3 while telemetry is flowing (`net --json` always exits 0); `egress` when the kernel's rules aren't confirmed to match, which includes "UNVERIFIED" (see below) and an unreadable state file; `lan-privacy` when LLMNR/mDNS is on or a hardware Wi-Fi address is in use; `profile` when a setting didn't read back; `sinkhole` when entries are missing, the resolver ignores `/etc/hosts`, or DevShield's block in it is damaged (a start marker without an end marker: DevShield then refuses to change the file until you fix it).
-  - `block`, `unblock`, `allow`, `disallow` and `restore-all` exit 3 when they worked but with a caveat, printed as a ⚠ note (for example a process that could not be moved back).
+  - `block`, `unblock`, `allow`, `disallow`, `block-doh` and `restore-all` exit 3 when they worked but with a caveat, printed as a ⚠ note (for example a process that could not be moved back).
 
 **Sensors and thermal profiles (Linux):**
 
@@ -182,7 +182,18 @@ sudo devshield sinkhole off      # remove only that block
 
 The list is deliberately small and documented, so every entry is a pure telemetry endpoint: Ubuntu usage reporting, VS Code/.NET telemetry, Next.js telemetry. Update servers are on a never-block list. Root can supply its own list in `/etc/devshield/hosts_blocklist.json`.
 - **Your entries are safe.** Your own lines in `/etc/hosts` are never touched, and `off` removes only DevShield's block, keeping edits you made since. A one-time copy of the original file is kept in the root-only state directory.
-- **Status warns you** if the sinkhole can't work: name resolution that ignores `/etc/hosts`, or entries removed by hand. Browsers using DNS-over-HTTPS bypass hosts-file blocking.
+- **Status warns you** if the sinkhole can't work: name resolution that ignores `/etc/hosts`, or entries removed by hand. Programs that use encrypted DNS (DNS-over-HTTPS or over TLS) bypass `/etc/hosts`; see `block-doh` below.
+
+```bash
+sudo devshield block-doh on      # drop encrypted DNS that would bypass /etc/hosts
+sudo devshield block-doh off
+```
+
+- Drops DNS over TLS and over QUIC (port 853) to any address, and HTTPS to the well-known public DoH resolvers (Cloudflare, Google, Quad9, OpenDNS, AdGuard), for every program and also through a lockdown's tunnel.
+- With the sinkhole on, it also sinkholes those resolvers' host names. Browsers look these up through the normal resolver before switching to DoH, so the switch fails and they keep using `/etc/hosts`. With the sinkhole off, this part is skipped, and `block-doh on` says so.
+- Off by default, on purpose: encrypted DNS also hides your lookups from your network provider, and this takes that away.
+- **It can't be complete.** DoH works through any HTTPS server, and this blocks only the well-known resolvers. An agent that brings its own resolver gets past it, though a lockdown still limits where its traffic can go.
+- Live-tested in a namespace: a resolver's address and port 853 dropped, other HTTPS unaffected, a resolver's name sinkholed while on and resolving again after `off`.
 
 **Network monitor (Linux)**: which program is talking to whom.
 
@@ -226,7 +237,7 @@ sudo devshield unblock 17d4a1d7  # give it its network access back
 
 - Everything else keeps working. Only that agent's processes lose the network, and so does anything they launch (shells, curl, child tools), **loopback included**, so it can't hand traffic to a local proxy.
 - **Connections it already had are cut too.** Those sockets were opened before the block, so DevShield drops them by their exact addresses.
-- **It stays blocked.** If the agent restarts, it is caught again at the next scan (up to about 10 seconds; logged as `AGENT_REQUARANTINED`). Until then `devshield agents` shows it with ⏳ (blocked, not yet cut off). The block survives reboots. You can also block an agent DevShield has seen before that isn't running now: it is cut off at the first scan after it starts (again up to about 10 seconds).
+- **It stays blocked.** If the agent restarts, it is cut off **as it starts**: the kernel reports the start, DevShield recognises the program and moves it into the quarantine (about 10–20 ms in tests; logged as `AGENT_REQUARANTINED`). Connections it opened in that moment are dropped like any it had before. The block survives reboots. You can also block an agent DevShield has seen before that isn't running now: it is cut off the same way when it starts. Without kernel exec events (see Agent Watch's limits), this waits for the next scan, up to about 10 seconds, and `devshield agents` shows ⏳ (blocked, not yet cut off) meanwhile. An allowed agent that restarts gets its allowance back the same way.
 - Rules for the agent's old connections are removed at the next scan after those sockets close (up to about 10 seconds), so a port it once used isn't left blocked for another program.
 - Uses a cgroup v2 group (`devshield-quarantine`). Tested on unified and "hybrid" cgroup layouts in namespaces, not yet on a real distribution under systemd. If cgroup v2 isn't mounted at all, `devshield egress` says so.
 - When unblocked, processes go back to the cgroup they came from. If that fails, they are placed in the root cgroup (outside their session's limits) and DevShield logs `EGRESS_RELEASE_FALLBACK`. A process in the quarantine that DevShield can't trace back to the agent (for example a helper that detached from it) **stays cut off** (fail closed): `unblock` says so, logs `EGRESS_RELEASE_KEPT`, and you can end that process or run `restore-all`.
@@ -272,7 +283,7 @@ sudo devshield lockdown off
   This is live-tested against the kernel in namespaces: a forwarded packet, and a send to UDP port 67 at a public address, were dropped. DNS and IPv6 blocking follow from the final drop rule; they are not separately live-probed.
 - **Telemetry needs your permission.** With the sinkhole on and lockdown on, telemetry from any vendor (operating system, drivers, editors) can only leave through the path you chose, and only if its domain isn't blocked. Every drop is counted, and samples are logged (`devshield-lockdown-drop` in the kernel log).
 - **With `--tor`, name lookups need Tor too.** Point programs at Tor's SOCKS port with remote DNS, or set Tor's `DNSPort` as the resolver; ordinary DNS is blocked, which is what prevents the leak.
-- **SSH into this machine keeps working.** Replies to connections someone makes *to* this machine are allowed. This is also a way out: a program that runs a server which someone outside connects to can send data back through it. `--strict` blocks those replies too, but it also cuts SSH.
+- **SSH into this machine keeps working, and nothing else answers.** Replies to connections someone makes *to* this machine may leave only for the services you name. The default is SSH, `22/tcp`. Without this, a program running a server that someone outside connects to could send data back that way. Name other services with `--inbound`, for example `--inbound 22/tcp --inbound 8443/tcp`; the list replaces the default. `--inbound all` allows every reply, which is the old behaviour. `--strict` allows none, SSH included. Live-tested: a server on another port can't answer an inbound connection, SSH can, and `--inbound`/`--strict` change that as described. A program that runs as root can still answer on port 22 if nothing else listens there.
 - **With `--lan`**, name lookups and announcements on the local network are dropped too: DNS, mDNS, LLMNR and NetBIOS. Printers that are found by name won't be discovered; use their IP address.
 - **`--confirm-within`** must be at least 10 seconds. An unconfirmed lockdown is never saved to disk, so a restart or reboot also reverts it, and stopping the daemon (`systemctl stop`) reverts it on the way out. If the daemon is killed instead, the lockdown stays until it starts again (the service restarts it within seconds) or the machine reboots.
 - Endpoints must be IP addresses: looking up a name would itself need traffic outside the tunnel. `--endpoint` on its own is refused: it needs `--via`, `--user`, `--tor` or `--only-allowed`, because a tunnel server alone gives programs no way out.
@@ -284,7 +295,7 @@ sudo devshield lockdown off
 - **Data hidden inside traffic you allowed.** If a program is allowed out, DevShield can't tell what it sends.
 - **Programs that set up their own route** through a tunnel you allowed. Lockdown controls *how* traffic leaves, not which program sends it.
 - **Blocking works per process.** An agent that runs *inside* another program, such as an editor extension, shares that program's process. Blocking it also cuts the host program (for example the editor's extension host) off the network.
-- **A gap of up to about 10 seconds** when a blocked agent restarts, until the next scan catches it.
+- **A short gap when a blocked agent restarts:** about 10–20 ms with kernel exec events, up to about 10 seconds without them.
 - **Work done through a helper that is already running.** A blocked agent that asks a privileged service to act for it (for example `docker run …` through the Docker daemon, `systemd-run --user`, `at`, or a new tmux window) has that work done by a process outside the quarantine group. Lockdown still covers what such helpers send, including forwarded container traffic; a per-agent block does not.
 - **Old-style cgroup v1 network controllers** (net_cls/net_prio) in use on a hybrid system disable the per-agent match. This is rare on modern distributions.
 - **Allowing arbitrary programs (a browser, a game)** and **ask-before-connect prompts** (like simplewall or OpenSnitch) are not built yet; today you allow agents, tunnels and users. See the roadmap.

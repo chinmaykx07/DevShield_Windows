@@ -37,6 +37,10 @@ func (d *Daemon) startEgress() {
 		return
 	}
 	d.watcher.OnChange(d.reconcileEgress)
+	d.watcher.OnExec(d.execStarted)
+	if err := d.watcher.ExecEvents(); err != nil {
+		d.event("EXEC_EVENTS_UNAVAILABLE", "kernel exec events unavailable ("+err.Error()+"): a restarted blocked agent is caught at the next scan (up to about 10 s) and very short commands can be missed", "warn")
+	}
 	d.bg.Add(1)
 	go func() {
 		defer d.bg.Done()
@@ -145,6 +149,23 @@ func (d *Daemon) reconcileEgress() {
 	}
 	for _, id := range d.egress.Reconcile(running) {
 		d.event("AGENT_REQUARANTINED", "blocked agent "+id+" came back (restarted or new process) and was cut off again", "warn")
+	}
+}
+
+// execStarted handles one program start (kernel exec event): if it is a
+// blocked agent starting again, it is cut off now instead of at the next
+// scan; an allowed agent gets its allowance back now.
+func (d *Daemon) execStarted(pid int32) {
+	m := d.egress
+	if m == nil || !m.HasMembers() {
+		return
+	}
+	fp, start, ok := d.watcher.Identify(pid)
+	if !ok || fp == "" || (!m.IsBlocked(fp) && !m.IsAllowed(fp)) {
+		return
+	}
+	for _, id := range m.Reconcile(map[string][]egress.Proc{fp: {{PID: int(pid), Start: start}}}) {
+		d.event("AGENT_REQUARANTINED", "blocked agent "+id+" started again and was cut off as it started", "warn")
 	}
 }
 
@@ -276,7 +297,12 @@ func (d *Daemon) setLockdown(mode string, req *ipc.LockdownRequest, peer ipc.Pee
 		}
 		confirm := time.Duration(req.ConfirmSec) * time.Second
 		err = d.egress.LockdownOn(l, confirm)
-		detail = fmt.Sprintf("via %v, endpoints %v, users %v, allowed agents only %v, lan %v, strict %v", l.Interfaces, l.Endpoints, l.Users, l.OnlyAllowed, l.AllowLAN, l.NoReplies)
+		all, svcs := l.ReplyServices()
+		replies := fmt.Sprint(svcs)
+		if all {
+			replies = "all"
+		}
+		detail = fmt.Sprintf("via %v, endpoints %v, users %v, allowed agents only %v, lan %v, replies to inbound %s", l.Interfaces, l.Endpoints, l.Users, l.OnlyAllowed, l.AllowLAN, replies)
 		if confirm > 0 {
 			detail += fmt.Sprintf(", reverts in %s unless confirmed", confirm)
 		}
@@ -305,7 +331,7 @@ func withNote(s, note string) string {
 // lockdownFrom resolves user names (as root, so the answer is the
 // system's, not the caller's).
 func lockdownFrom(r *ipc.LockdownRequest) (egress.Lockdown, error) {
-	l := egress.Lockdown{Interfaces: r.Via, Endpoints: r.Endpoints, AllowLAN: r.LAN, NoReplies: r.Strict, OnlyAllowed: r.OnlyAllowed}
+	l := egress.Lockdown{Interfaces: r.Via, Endpoints: r.Endpoints, AllowLAN: r.LAN, NoReplies: r.Strict, OnlyAllowed: r.OnlyAllowed, Inbound: r.Inbound}
 	for _, u := range r.Users {
 		uid, err := lookupUser(u)
 		if err != nil {
