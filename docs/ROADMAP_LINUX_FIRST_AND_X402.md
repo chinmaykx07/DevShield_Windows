@@ -17,7 +17,7 @@ Status: decisions taken 2026-10-20 (section 7). Section 8 covers the owner-sover
 
 | Area | State |
 |---|---|
-| Go core | Builds and vets for Windows and Linux. 113 unit-test functions (race detector clean), plus a live Linux suite (`test/linux-live/`, 87 checks per cgroup layout). |
+| Go core | Builds and vets for Windows and Linux. 138 unit-test functions (race detector clean), plus a live Linux suite (`test/linux-live/`, 107 checks per cgroup layout). |
 | Agent Watch (AI/rogue agents) | Behaviour plus catalog identity. Unit-tested, including the false positives found in the 2026-10-21 audit. Live-tested in `test/linux-live/` with a catalogued fake agent and an uncatalogued program caught by behaviour alone (a model port); the other behaviour signals are unit-tested only. **Not run on Windows.** |
 | PowerShell features (profiles, privacy, Tor, guardian, rollback, dashboard) | **Windows-only and largely non-functional as wired.** Tasks never register, prompts block, rollback restores nothing, the guardian crashes, the Tor kill-switch blocks nothing. See the review notes. |
 | Linux support | Root daemon + CLI: Agent Watch, network block/allow/lockdown, sinkhole, LAN privacy, network monitor, thermal, sensors, restore-all. See the progress list for how each is tested. Not yet run under systemd; no tray. |

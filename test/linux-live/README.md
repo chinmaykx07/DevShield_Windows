@@ -24,7 +24,7 @@ Don't run two copies at once: the kernel has one cgroup v2 hierarchy for the
 whole machine, so their quarantine groups would collide. That happened once
 and produced a false failure.
 
-About 87 checks run per cgroup layout. The work directory is under
+About 107 checks run per cgroup layout (plus 2 skipped: see below). The work directory is under
 `/var/lib`, not `/tmp`: Agent Watch rightly flags scripts that run from
 `/tmp`, and the fake agent's script lives in the work directory.
 
