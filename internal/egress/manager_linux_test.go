@@ -168,7 +168,7 @@ func TestTidyDropsRulesOfClosedSockets(t *testing.T) {
 	// One live listener on 127.0.0.1:631.
 	os.WriteFile(filepath.Join(proc, "net", "tcp"), []byte("  sl  local_address rem_address   st\n"+
 		"   0: 0100007F:0277 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 18311 1\n"), 0o644)
-	m := &Manager{cfg: Config{ProcRoot: proc}, st: state{Blocked: map[string]*Blocked{"fp": {
+	m := &Manager{cfg: Config{ProcRoot: proc}, st: state{Blocked: map[string]*Member{"fp": {
 		Origins: map[int]string{4242: "/a", 999999: "/b"},
 		Flows:   []Flow{{Proto: "tcp", LocalIP: "127.0.0.1", LocalPort: 631}, {Proto: "tcp", LocalPort: 8080}},
 	}}}}

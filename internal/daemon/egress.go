@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/chinmaykx07/DevShield_Windows/internal/agentwatch"
 	"github.com/chinmaykx07/DevShield_Windows/internal/egress"
 	"github.com/chinmaykx07/DevShield_Windows/internal/ipc"
 )
@@ -52,17 +53,79 @@ func (d *Daemon) startEgress() {
 	}()
 }
 
-// reconcileEgress re-quarantines blocked agents that were restarted.
+// reconcileEgress re-quarantines blocked agents that were restarted, and
+// suspends the network allowance of any allowed agent that no longer
+// deserves it (sanction revoked, binary replaced, or rogue behaviour).
 func (d *Daemon) reconcileEgress() {
 	running := map[string][]int{}
+	verdict := map[string]string{}
 	for _, a := range d.watcher.Running() {
+		verdict[a.Fingerprint] = a.Verdict
 		for _, p := range a.PIDs {
 			running[a.Fingerprint] = append(running[a.Fingerprint], int(p))
+		}
+	}
+	for _, fp := range d.egress.AllowedFingerprints() {
+		why := ""
+		if v, ok := verdict[fp]; ok && v != agentwatch.VerdictSanctioned {
+			why = "its verdict is now " + v
+		} else if !ok && d.watcher.StoredStatus(fp) != agentwatch.AgentSanctioned {
+			why = "it is no longer sanctioned"
+		}
+		if why == "" {
+			continue
+		}
+		if err := d.egress.Disallow(fp); err == nil {
+			d.event("AGENT_ALLOW_SUSPENDED", fmt.Sprintf("network allowance of %s withdrawn: %s", agentwatch.ShortID(fp), why), "warn")
 		}
 	}
 	for _, id := range d.egress.Reconcile(running) {
 		d.event("AGENT_REQUARANTINED", "blocked agent "+id+" came back (restarted or new process) and was cut off again", "warn")
 	}
+}
+
+// setAllow lets a sanctioned, well-behaved agent out during a lockdown.
+func (d *Daemon) setAllow(op, id string, peer ipc.Peer) ipc.Response {
+	if d.egress == nil {
+		return ipc.Response{Error: "network controls are not available on this system"}
+	}
+	if op == "disallow" {
+		fp, ok := d.egress.ResolveAllowed(id)
+		if !ok {
+			return ipc.Response{Error: fmt.Sprintf("no allowed agent matches %q (see: devshield egress)", id)}
+		}
+		if err := d.egress.Disallow(fp); err != nil {
+			return ipc.Response{Error: err.Error()}
+		}
+		d.event("AGENT_DISALLOWED", fmt.Sprintf("%s may no longer go out during lockdown (by %s)", id, peer), "ok")
+		return d.egressStatus()
+	}
+	fp, name, short, err := d.watcher.ResolveKnown(id)
+	if err != nil {
+		return ipc.Response{Error: err.Error()}
+	}
+	var pids []int
+	for _, a := range d.watcher.Running() {
+		if a.Fingerprint != fp {
+			continue
+		}
+		if a.Verdict != agentwatch.VerdictSanctioned {
+			return ipc.Response{Error: fmt.Sprintf("%s is %s: only a sanctioned agent with no risk signs can be allowed (sudo devshield sanction %s first)", short, a.Verdict, short)}
+		}
+		for _, p := range a.PIDs {
+			pids = append(pids, int(p))
+		}
+	}
+	if pids == nil && d.watcher.StoredStatus(fp) != agentwatch.AgentSanctioned {
+		return ipc.Response{Error: fmt.Sprintf("%s is not sanctioned: sudo devshield sanction %s first", short, short)}
+	}
+	moved, err := d.egress.Allow(fp, short, name, pids)
+	if err != nil {
+		d.event("EGRESS_FAILED", fmt.Sprintf("allow %s: %v (by %s)", id, err, peer), "fail")
+		return ipc.Response{Error: err.Error()}
+	}
+	d.event("AGENT_ALLOWED", fmt.Sprintf("%s (%s) may go out during lockdown: %d processes (by %s)", short, name, moved, peer), "ok")
+	return d.egressStatus()
 }
 
 func (d *Daemon) egressStatus() ipc.Response {
@@ -132,7 +195,7 @@ func (d *Daemon) setLockdown(mode string, req *ipc.LockdownRequest, peer ipc.Pee
 		}
 		confirm := time.Duration(req.ConfirmSec) * time.Second
 		err = d.egress.LockdownOn(l, confirm)
-		detail = fmt.Sprintf("via %v, endpoints %v, users %v, lan %v, strict %v", l.Interfaces, l.Endpoints, l.Users, l.AllowLAN, l.NoReplies)
+		detail = fmt.Sprintf("via %v, endpoints %v, users %v, allowed agents only %v, lan %v, strict %v", l.Interfaces, l.Endpoints, l.Users, l.OnlyAllowed, l.AllowLAN, l.NoReplies)
 		if confirm > 0 {
 			detail += fmt.Sprintf(", reverts in %s unless confirmed", confirm)
 		}
@@ -154,7 +217,7 @@ func (d *Daemon) setLockdown(mode string, req *ipc.LockdownRequest, peer ipc.Pee
 // lockdownFrom resolves user names (as root, so the answer is the
 // system's, not the caller's).
 func lockdownFrom(r *ipc.LockdownRequest) (egress.Lockdown, error) {
-	l := egress.Lockdown{Interfaces: r.Via, Endpoints: r.Endpoints, AllowLAN: r.LAN, NoReplies: r.Strict}
+	l := egress.Lockdown{Interfaces: r.Via, Endpoints: r.Endpoints, AllowLAN: r.LAN, NoReplies: r.Strict, OnlyAllowed: r.OnlyAllowed}
 	for _, u := range r.Users {
 		uid, err := lookupUser(u)
 		if err != nil {

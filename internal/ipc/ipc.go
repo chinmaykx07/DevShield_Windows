@@ -42,13 +42,14 @@ type Request struct {
 // LockdownRequest describes the allowed outbound paths. Users are names
 // or uids; the daemon resolves them.
 type LockdownRequest struct {
-	Via        []string `json:"via,omitempty"`       // tunnel interfaces
-	Endpoints  []string `json:"endpoints,omitempty"` // "ip:port/proto" of the tunnel servers
-	Users      []string `json:"users,omitempty"`
-	Tor        bool     `json:"tor,omitempty"` // allow the Tor daemon's user
-	LAN        bool     `json:"lan,omitempty"`
-	Strict     bool     `json:"strict,omitempty"`
-	ConfirmSec int      `json:"confirm_sec,omitempty"`
+	Via         []string `json:"via,omitempty"`       // tunnel interfaces
+	Endpoints   []string `json:"endpoints,omitempty"` // "ip:port/proto" of the tunnel servers
+	Users       []string `json:"users,omitempty"`
+	Tor         bool     `json:"tor,omitempty"`          // allow the Tor daemon's user
+	OnlyAllowed bool     `json:"only_allowed,omitempty"` // no tunnel: only allowed agents go out
+	LAN         bool     `json:"lan,omitempty"`
+	Strict      bool     `json:"strict,omitempty"`
+	ConfirmSec  int      `json:"confirm_sec,omitempty"`
 }
 
 // Agent is the client-facing view of one running agent.
@@ -66,6 +67,7 @@ type Agent struct {
 	Reasons   []string `json:"reasons,omitempty"`
 	Risks     []string `json:"risks,omitempty"`
 	Blocked   bool     `json:"network_blocked,omitempty"`
+	Allowed   bool     `json:"network_allowed,omitempty"`
 }
 
 // Status summarises the daemon's health.

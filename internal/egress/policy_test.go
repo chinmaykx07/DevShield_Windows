@@ -79,6 +79,23 @@ func TestHybridCgroupPath(t *testing.T) {
 	}
 }
 
+func TestAllowedAgentsOnlyDuringLockdown(t *testing.T) {
+	s, err := Render(Policy{Quarantine: true, AllowedPath: AllowedCgroup, Lockdown: &Lockdown{OnlyAllowed: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q, a, d := strings.Index(s, `"devshield-quarantine" counter drop`), strings.Index(s, `"devshield-allowed" accept`), strings.Index(s, "everything else")
+	if q < 0 || a < 0 || !(q < a && a < d) {
+		t.Fatalf("want quarantine drop < allowed accept < final drop:\n%s", s)
+	}
+	if s, _ := Render(Policy{AllowedPath: AllowedCgroup, KillFlows: []Flow{{Proto: "tcp", LocalPort: 1}}}); strings.Contains(s, "devshield-allowed") {
+		t.Fatal("allowed rule rendered without a lockdown")
+	}
+	if _, err := Render(Policy{AllowedPath: "devshield-quarantine", Lockdown: &Lockdown{OnlyAllowed: true}}); err == nil {
+		t.Fatal("wrong group accepted as the allowed group")
+	}
+}
+
 func TestRenderKillFlows(t *testing.T) {
 	s, err := Render(Policy{KillFlows: []Flow{
 		{Proto: "tcp", LocalIP: "10.0.0.2", LocalPort: 51000, RemoteIP: "160.79.104.10", RemotePort: 443},

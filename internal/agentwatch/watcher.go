@@ -311,6 +311,9 @@ func (w *Watcher) alertVerdict(a *RunningAgent, wasRunning bool) {
 	}
 }
 
+// ShortID is the human id of an agent fingerprint (as shown by "devshield agents").
+func ShortID(fingerprint string) string { return shortID(fingerprint) }
+
 func shortID(fingerprint string) string {
 	sum := sha256.Sum256([]byte(fingerprint))
 	return hex.EncodeToString(sum[:4])
@@ -711,6 +714,24 @@ func (w *Watcher) ResolveKnown(id string) (fingerprint, name, short string, err 
 		return hits[0].Fingerprint, hits[0].Name, shortID(hits[0].Fingerprint), nil
 	}
 	return "", "", "", fmt.Errorf("id %q is ambiguous (%d agents)", id, len(hits))
+}
+
+// StoredStatus is fp's sanction status in the agent database ("" if never
+// seen). Unlike a running agent's Verdict it says nothing about behaviour.
+func (w *Watcher) StoredStatus(fp string) string {
+	if w.cfg.DB == nil {
+		return ""
+	}
+	recs, err := listAgents(w.cfg.DB)
+	if err != nil {
+		return ""
+	}
+	for _, r := range recs {
+		if r.Fingerprint == fp {
+			return r.Status
+		}
+	}
+	return ""
 }
 
 // OnChange registers a callback fired when the running set, a verdict or

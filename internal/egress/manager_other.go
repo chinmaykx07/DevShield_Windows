@@ -27,6 +27,8 @@ type Status struct {
 	Lockdown         *Lockdown   `json:"lockdown,omitempty"`
 	ConfirmBy        time.Time   `json:"confirm_by,omitempty"`
 	QuarantinedProcs int         `json:"quarantined_processes"`
+	Allowed          []BlockInfo `json:"allowed,omitempty"`
+	AllowedProcs     int         `json:"allowed_processes"`
 }
 
 // BlockInfo is the client view of one blocked agent.
@@ -46,6 +48,11 @@ func (*Manager) Unblock(string) error                                  { return 
 func (*Manager) Reconcile(map[string][]int) []string                   { return nil }
 func (*Manager) IsBlocked(string) bool                                 { return false }
 func (*Manager) ResolveBlocked(string) (string, bool)                  { return "", false }
+func (*Manager) Allow(string, string, string, []int) (int, error)      { return 0, errUnsupported }
+func (*Manager) Disallow(string) error                                 { return errUnsupported }
+func (*Manager) IsAllowed(string) bool                                 { return false }
+func (*Manager) AllowedFingerprints() []string                         { return nil }
+func (*Manager) ResolveAllowed(string) (string, bool)                  { return "", false }
 func (*Manager) LockdownOn(Lockdown, time.Duration) error              { return errUnsupported }
 func (*Manager) Confirm() error                                        { return errUnsupported }
 func (*Manager) LockdownOff() error                                    { return errUnsupported }

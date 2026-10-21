@@ -189,6 +189,21 @@ sudo devshield unblock 17d4a1d7  # give it its network access back
 - Rules for the agent's old connections are removed once those sockets close, so a port it once used is never blocked for another program.
 - Uses a cgroup v2 group (`devshield-quarantine`). Works on unified and on "hybrid" cgroup layouts. If cgroup v2 isn't mounted at all, `devshield egress` says so.
 
+*Allow one agent out during a lockdown* (the "Allow" step):
+
+```bash
+sudo devshield sanction 6120139f   # approve it first
+sudo devshield allow 6120139f      # it (and the tools it starts) may go out during lockdown
+sudo devshield lockdown on --only-allowed   # nothing else goes out at all
+sudo devshield disallow 6120139f
+```
+
+- Only a **sanctioned** agent with **no risk signs** can be allowed.
+- The allowance is **withdrawn automatically** (`AGENT_ALLOW_SUSPENDED`) the moment that stops being true: the sanction is revoked, the program file is replaced, or Agent Watch sees rogue behaviour.
+- A restarted allowed agent is allowed again at the next scan. Blocking always wins over allowing.
+- Outside a lockdown, allowing changes nothing, because everything may go out anyway.
+- Allowed and blocked agents are identified the way Agent Watch identifies them. That includes processes whose command line matches a catalog pattern, together with their children, so keep custom catalog patterns specific.
+
 *Lockdown: nothing leaves except the way you choose.* This is the alternative to a Tor-only kill switch, for networks that block Tor:
 
 ```bash
@@ -221,7 +236,7 @@ sudo devshield lockdown off
 - **Blocking works per process.** An agent that runs *inside* another program, such as an editor extension, shares that program's process. Blocking it also cuts the host program (for example the editor's extension host) off the network.
 - **A gap of up to about 10 seconds** when a blocked agent restarts, until the next scan catches it.
 - **Old-style cgroup v1 network controllers** (net_cls/net_prio) in use on a hybrid system disable the per-agent match. This is rare on modern distributions.
-- **Ask-before-connect, per program (like simplewall or OpenSnitch)**, is not built yet. See the roadmap.
+- **Allowing arbitrary programs (a browser, a game)** and **ask-before-connect prompts** (like simplewall or OpenSnitch) are not built yet; today you allow agents, tunnels and users. See the roadmap.
 
 **Install, by hand for now** (packages come later):
 
@@ -234,7 +249,7 @@ sudo systemctl daemon-reload && sudo systemctl enable --now devshield
 sudo systemctl enable devshield-egress   # network rules at boot, before the network starts
 ```
 
-Status: tested by unit tests and a live run with real users on Linux (owner/other user, a rogue attempting self-sanction, `kill -9`, log tampering). **Not yet tested under systemd itself**, so the unit's hardening settings still need a real-machine check. The sinkhole was tested live on a real Linux system: the resolver returned 0.0.0.0 for blocked domains, update servers kept resolving, and `/etc/hosts` came back byte-for-byte identical after `off`. Sensors and thermal profiles are tested on simulated kernel layouts (Intel/AMD, laptop and desktop) and through the real daemon socket, but **not yet on real hardware**. Network controls were tested live through the real daemon, kernel and nft, in an isolated network namespace with both unified and hybrid cgroup layouts. The tests covered: blocking a running agent and its child (held and new connections stopped, other programs unaffected), re-blocking after a restart, unblocking, lockdown via a tunnel interface, an endpoint or an allowed user, the auto-revert, restoring a deleted table, keeping lockdown across a daemon restart, blocking an agent before it starts, removing rules for closed sockets, detecting one deleted rule inside the table, and `egress-restore` with no daemon running. They were **not yet** run with a real WireGuard/Tor setup, or under systemd. The Linux tray comes next.
+Status: tested by unit tests and a live run with real users on Linux (owner/other user, a rogue attempting self-sanction, `kill -9`, log tampering). **Not yet tested under systemd itself**, so the unit's hardening settings still need a real-machine check. The sinkhole was tested live on a real Linux system: the resolver returned 0.0.0.0 for blocked domains, update servers kept resolving, and `/etc/hosts` came back byte-for-byte identical after `off`. Sensors and thermal profiles are tested on simulated kernel layouts (Intel/AMD, laptop and desktop) and through the real daemon socket, but **not yet on real hardware**. Network controls were tested live through the real daemon, kernel and nft, in an isolated network namespace with both unified and hybrid cgroup layouts. The tests covered: blocking a running agent and its child (held and new connections stopped, other programs unaffected), re-blocking after a restart, unblocking, lockdown via a tunnel interface, an endpoint or an allowed user, the auto-revert, restoring a deleted table, keeping lockdown across a daemon restart, blocking an agent before it starts, removing rules for closed sockets, detecting one deleted rule inside the table, and `egress-restore` with no daemon running; allowing a sanctioned agent out of an allowed-only lockdown (other programs stayed blocked), automatic withdrawal on revoke, re-allow after restart, and block overriding allow. They were **not yet** run with a real WireGuard/Tor setup, or under systemd. The Linux tray comes next.
 
 ## 3. Pro Use
 

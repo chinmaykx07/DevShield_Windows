@@ -58,8 +58,12 @@ Usage:
   devshield egress [--json]       network quarantine and lockdown status
   sudo devshield block <id>       cut one agent (and its children) off the network
   sudo devshield unblock <id>     give it its network access back
+  sudo devshield allow <id>       let a sanctioned agent out during lockdown (withdrawn
+                                  automatically if it turns risky or loses its sanction)
+  sudo devshield disallow <id>
   sudo devshield lockdown on [--via IFACE]... [--endpoint IP:PORT/PROTO]...
-                    [--user NAME]... [--tor] [--lan] [--strict] [--confirm-within 2m]
+                    [--user NAME]... [--tor] [--only-allowed] [--lan] [--strict]
+                    [--confirm-within 2m]
                                   nothing leaves except through the tunnel, the
                                   tunnel's servers and the users you name
   sudo devshield lockdown confirm keep a lockdown started with --confirm-within
@@ -138,7 +142,7 @@ func runCLI(args []string, stdout, stderr io.Writer) int {
 		return 0
 	case "egress":
 		return cliEgress(cargs, socket, stdout, stderr)
-	case "block", "unblock":
+	case "block", "unblock", "allow", "disallow":
 		if len(cargs) != 1 {
 			fmt.Fprintf(stderr, "usage: sudo devshield %s <agent id>\n", cmd)
 			return 2
@@ -276,6 +280,9 @@ func cliAgents(args []string, socket string, stdout, stderr io.Writer) int {
 		}
 		if a.Blocked {
 			fmt.Fprintln(stdout, "          🔒 network blocked")
+		}
+		if a.Allowed {
+			fmt.Fprintln(stdout, "          🌐 allowed out during lockdown")
 		}
 		for _, r := range a.Risks {
 			fmt.Fprintf(stdout, "          ⚠ %s\n", r)
@@ -452,13 +459,14 @@ func cliLockdown(args []string, socket string, stdout, stderr io.Writer) int {
 		fs.Var(&eps, "endpoint", "tunnel server IP:PORT/PROTO reachable directly (repeatable)")
 		fs.Var(&users, "user", "user (name or uid) allowed out directly, e.g. a VPN client's account (repeatable)")
 		tor := fs.Bool("tor", false, "allow the Tor daemon's user (programs then reach the internet only through Tor)")
+		only := fs.Bool("only-allowed", false, "no tunnel at all: only agents you allowed (devshield allow) may go out")
 		lan := fs.Bool("lan", false, "also allow the local network (printers, NAS); DNS still must use the tunnel")
 		strict := fs.Bool("strict", false, "also block replies to inbound connections (breaks SSH into this machine)")
 		confirm := fs.Duration("confirm-within", 0, "revert automatically unless 'devshield lockdown confirm' is run in time")
 		if err := fs.Parse(args[1:]); err != nil {
 			return 2
 		}
-		req.Lockdown = &ipc.LockdownRequest{Via: via, Endpoints: eps, Users: users, Tor: *tor,
+		req.Lockdown = &ipc.LockdownRequest{Via: via, Endpoints: eps, Users: users, Tor: *tor, OnlyAllowed: *only,
 			LAN: *lan, Strict: *strict, ConfirmSec: int(confirm.Seconds())}
 	}
 	resp, ok := call(socket, req, stderr)
@@ -501,6 +509,9 @@ func printEgress(e *egress.Status, stdout io.Writer) {
 		for _, u := range l.Users {
 			fmt.Fprintf(stdout, "  · programs of uid %d\n", u)
 		}
+		if len(e.Allowed) > 0 {
+			fmt.Fprintln(stdout, "  · the allowed agents listed below")
+		}
 		if l.AllowLAN {
 			fmt.Fprintln(stdout, "  · the local network (except DNS)")
 		}
@@ -519,6 +530,16 @@ func printEgress(e *egress.Status, stdout io.Writer) {
 		fmt.Fprintf(stdout, "Blocked agents (%d processes quarantined):\n", e.QuarantinedProcs)
 		for _, b := range e.Blocked {
 			fmt.Fprintf(stdout, "  🔒 %-9s %-30s since %s, %d earlier connections cut\n", b.ID, truncate(b.Name, 30), b.Since.Local().Format("2006-01-02 15:04"), b.Flows)
+		}
+	}
+	if len(e.Allowed) > 0 {
+		note := ""
+		if e.Lockdown == nil {
+			note = " — takes effect during a lockdown"
+		}
+		fmt.Fprintf(stdout, "Allowed agents (%d processes)%s:\n", e.AllowedProcs, note)
+		for _, b := range e.Allowed {
+			fmt.Fprintf(stdout, "  ✅ %-9s %-30s since %s\n", b.ID, truncate(b.Name, 30), b.Since.Local().Format("2006-01-02 15:04"))
 		}
 	}
 	if !e.CgroupV2 {

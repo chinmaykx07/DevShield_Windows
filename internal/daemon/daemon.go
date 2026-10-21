@@ -10,7 +10,7 @@
 //	       thermal, privacy, egress)
 //	write (sanction, revoke, profile,       root only — i.e. the owner via sudo
 //	       sinkhole, block, unblock,
-//	       lockdown)
+//	       lockdown, allow, disallow)
 //
 // A non-root process trying to change policy is recorded as
 // AGENT_TAMPER_ATTEMPT, naming the program that tried.
@@ -59,7 +59,7 @@ type Config struct {
 
 var readOps = map[string]bool{"status": true, "agents": true, "events": true, "verify": true, "thermal": true, "privacy": true, "egress": true}
 var writeOps = map[string]bool{"sanction": true, "revoke": true, "profile": true, "sinkhole": true,
-	"block": true, "unblock": true, "lockdown": true}
+	"block": true, "unblock": true, "lockdown": true, "allow": true, "disallow": true}
 
 // authorize decides whether peer may run op. tamper is true when a
 // non-root process attempted a policy change — worth an alert of its own.
@@ -306,6 +306,8 @@ func (d *Daemon) handle(peer ipc.Peer, req ipc.Request) ipc.Response {
 		return d.setBlock(req.Op, req.ID, peer)
 	case "lockdown":
 		return d.setLockdown(req.Profile, req.Lockdown, peer)
+	case "allow", "disallow":
+		return d.setAllow(req.Op, req.ID, peer)
 	}
 	return ipc.Response{Error: "unknown operation"}
 }
@@ -399,6 +401,7 @@ func (d *Daemon) agents() []ipc.Agent {
 			Verdict: a.Verdict, Status: a.Status, PID: a.PID, Processes: a.Processes,
 			User: a.User, Exe: a.Exe, Reasons: a.Reasons, Risks: a.ActiveRisks,
 			Blocked: d.egress != nil && d.egress.IsBlocked(a.Fingerprint),
+			Allowed: d.egress != nil && d.egress.IsAllowed(a.Fingerprint),
 		})
 	}
 	return out

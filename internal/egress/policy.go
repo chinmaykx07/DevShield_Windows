@@ -32,6 +32,9 @@ import (
 // members may not send any traffic.
 const QuarantineCgroup = "devshield-quarantine"
 
+// AllowedCgroup holds agents the owner allowed out during a lockdown.
+const AllowedCgroup = "devshield-allowed"
+
 // TableName is DevShield's own nftables table.
 const TableName = "devshield"
 
@@ -42,6 +45,8 @@ type Lockdown struct {
 	Users      []int    `json:"users,omitempty"`      // uids allowed out directly (e.g. the tor daemon user)
 	AllowLAN   bool     `json:"allow_lan"`            // private/link-local ranges
 	NoReplies  bool     `json:"no_replies,omitempty"` // strict: also block replies to inbound connections (breaks SSH into this machine)
+	// OnlyAllowed: no tunnel or user at all — only allowed agents go out.
+	OnlyAllowed bool `json:"only_allowed,omitempty"`
 }
 
 // Flow is one existing socket to cut: sockets keep the cgroup they were
@@ -107,6 +112,9 @@ type Policy struct {
 	// CgroupPath is the quarantine group relative to /sys/fs/cgroup, as nft
 	// resolves it ("" = QuarantineCgroup; hybrid systems: "unified/…").
 	CgroupPath string `json:"-"`
+	// AllowedPath is the allowed-agents group relative to /sys/fs/cgroup;
+	// "" = no allowed agents. Only used during a lockdown.
+	AllowedPath string `json:"-"`
 	// SkipLoopback is for tests only: lockdown normally always allows lo.
 	SkipLoopback bool `json:"-"`
 }
@@ -163,8 +171,8 @@ func validIface(name string) bool {
 
 // Validate checks a lockdown configuration before anything is applied.
 func (l *Lockdown) Validate() error {
-	if len(l.Interfaces) == 0 && len(l.Users) == 0 {
-		return fmt.Errorf("lockdown needs at least one tunnel interface (--via) or allowed user (--user); otherwise nothing could reach the internet")
+	if len(l.Interfaces) == 0 && len(l.Users) == 0 && !l.OnlyAllowed {
+		return fmt.Errorf("lockdown needs at least one tunnel interface (--via) or allowed user (--user), or --only-allowed; otherwise nothing could reach the internet")
 	}
 	for _, i := range l.Interfaces {
 		if !validIface(i) {
@@ -180,6 +188,15 @@ func (l *Lockdown) Validate() error {
 		if u < 0 {
 			return fmt.Errorf("invalid uid %d", u)
 		}
+	}
+	return nil
+}
+
+// checkGroupPath accepts only DevShield's own group, so nothing can be
+// injected into the rule.
+func checkGroupPath(path, group string) error {
+	if strings.ContainsAny(path, "\"\\\n") || strings.HasPrefix(path, "..") || filepath.Base(path) != group {
+		return fmt.Errorf("unexpected cgroup path %q", path)
 	}
 	return nil
 }
@@ -210,8 +227,8 @@ func Render(p Policy) (string, error) {
 		if path == "" {
 			path = QuarantineCgroup
 		}
-		if strings.ContainsAny(path, "\"\\\n") || strings.HasPrefix(path, "..") || filepath.Base(path) != QuarantineCgroup {
-			return "", fmt.Errorf("unexpected quarantine cgroup path %q", path)
+		if err := checkGroupPath(path, QuarantineCgroup); err != nil {
+			return "", err
 		}
 		// The group sits directly under the hierarchy root (level 1) wherever
 		// the hierarchy is mounted.
@@ -234,6 +251,12 @@ func Render(p Policy) (string, error) {
 			// Answers to connections someone else opened (e.g. SSH into this
 			// machine). This never allows a NEW outbound connection.
 			b.WriteString("\t\tct direction reply accept comment \"replies to inbound connections\"\n")
+		}
+		if p.AllowedPath != "" {
+			if err := checkGroupPath(p.AllowedPath, AllowedCgroup); err != nil {
+				return "", err
+			}
+			fmt.Fprintf(&b, "\t\tsocket cgroupv2 level 1 %q accept comment \"allowed agents\"\n", p.AllowedPath)
 		}
 		ifaces := append([]string(nil), l.Interfaces...)
 		sort.Strings(ifaces)

@@ -29,18 +29,19 @@ type Config struct {
 	Emit    func(action, detail, status string)
 }
 
-// Blocked is one quarantined agent.
-type Blocked struct {
+// Member is one agent DevShield placed in its quarantine or allowed group.
+type Member struct {
 	ID      string         `json:"id"`
 	Name    string         `json:"name"`
 	Since   time.Time      `json:"since"`
-	Origins map[int]string `json:"origins"` // pid → cgroup it came from, to put it back on unblock
-	Flows   []Flow         `json:"flows,omitempty"`
+	Origins map[int]string `json:"origins"`         // pid → cgroup it came from, to put it back on release
+	Flows   []Flow         `json:"flows,omitempty"` // quarantine only: sockets that predate the block
 }
 
 type state struct {
-	Blocked  map[string]*Blocked `json:"blocked"` // by agent fingerprint
-	Lockdown *Lockdown           `json:"lockdown,omitempty"`
+	Blocked  map[string]*Member `json:"blocked"`           // by agent fingerprint
+	Allowed  map[string]*Member `json:"allowed,omitempty"` // by agent fingerprint
+	Lockdown *Lockdown          `json:"lockdown,omitempty"`
 }
 
 // Manager owns DevShield's nftables table and quarantine cgroup.
@@ -62,6 +63,8 @@ type Status struct {
 	Lockdown         *Lockdown   `json:"lockdown,omitempty"`
 	ConfirmBy        time.Time   `json:"confirm_by,omitempty"`
 	QuarantinedProcs int         `json:"quarantined_processes"`
+	Allowed          []BlockInfo `json:"allowed,omitempty"`
+	AllowedProcs     int         `json:"allowed_processes"`
 }
 
 // BlockInfo is the client view of one blocked agent.
@@ -87,7 +90,7 @@ func New(cfg Config) (*Manager, error) {
 	if cfg.Emit == nil {
 		cfg.Emit = func(string, string, string) {}
 	}
-	m := &Manager{cfg: cfg, st: state{Blocked: map[string]*Blocked{}}}
+	m := &Manager{cfg: cfg, st: state{Blocked: map[string]*Member{}, Allowed: map[string]*Member{}}}
 	m.cgRoot = cfg.CgroupRoot
 	if m.cgRoot == "" {
 		m.cgRoot = findCgroup2(cfg.ProcRoot)
@@ -101,7 +104,10 @@ func New(cfg Config) (*Manager, error) {
 			return nil, fmt.Errorf("egress state %s: %w", m.statePath(), err)
 		}
 		if m.st.Blocked == nil {
-			m.st.Blocked = map[string]*Blocked{}
+			m.st.Blocked = map[string]*Member{}
+		}
+		if m.st.Allowed == nil {
+			m.st.Allowed = map[string]*Member{}
 		}
 	}
 	m.mu.Lock()
@@ -112,14 +118,20 @@ func New(cfg Config) (*Manager, error) {
 			return nil, err
 		}
 	}
+	if len(m.st.Allowed) > 0 && m.cgRoot != "" {
+		if err := os.MkdirAll(m.groupDir(AllowedCgroup), 0o755); err != nil {
+			return nil, err
+		}
+	}
 	if err := m.apply(); err != nil {
 		return m, err
 	}
 	return m, nil
 }
 
-func (m *Manager) statePath() string     { return filepath.Join(m.cfg.StateDir, "egress.json") }
-func (m *Manager) quarantineDir() string { return filepath.Join(m.cgRoot, QuarantineCgroup) }
+func (m *Manager) statePath() string        { return filepath.Join(m.cfg.StateDir, "egress.json") }
+func (m *Manager) quarantineDir() string    { return m.groupDir(QuarantineCgroup) }
+func (m *Manager) groupDir(g string) string { return filepath.Join(m.cgRoot, g) }
 
 // nftCgroupBase is where nft resolves "socket cgroupv2" paths (hardcoded
 // in nftables), so the rule names the group relative to it.
@@ -174,6 +186,9 @@ func (m *Manager) policy() Policy {
 		if _, err := os.Stat(m.quarantineDir()); err == nil {
 			p.Quarantine = true
 			p.CgroupPath, _ = filepath.Rel(nftCgroupBase, m.quarantineDir())
+		}
+		if _, err := os.Stat(m.groupDir(AllowedCgroup)); err == nil && p.Lockdown != nil {
+			p.AllowedPath, _ = filepath.Rel(nftCgroupBase, m.groupDir(AllowedCgroup))
 		}
 	}
 	fps := make([]string, 0, len(m.st.Blocked))
@@ -230,10 +245,13 @@ func (m *Manager) Block(fp, id, name string, pids []int) (moved, flows int, err 
 	if err := os.MkdirAll(m.quarantineDir(), 0o755); err != nil {
 		return 0, 0, err
 	}
+	if m.st.Allowed[fp] != nil {
+		m.release(m.st.Allowed, fp, AllowedCgroup) // block wins over an earlier allow
+	}
 	b := m.st.Blocked[fp]
 	isNew := b == nil
 	if isNew {
-		b = &Blocked{ID: id, Name: name, Since: time.Now().UTC(), Origins: map[int]string{}}
+		b = &Member{ID: id, Name: name, Since: time.Now().UTC(), Origins: map[int]string{}}
 		m.st.Blocked[fp] = b
 	}
 	// Load the quarantine rule BEFORE moving anyone: every socket created
@@ -247,7 +265,7 @@ func (m *Manager) Block(fp, id, name string, pids []int) (moved, flows int, err 
 		}
 		return 0, 0, err
 	}
-	moved = m.capture(b, pids)
+	moved = m.capture(b, pids, QuarantineCgroup)
 	n := len(b.Flows)
 	m.refreshFlows(b)
 	if err := m.apply(); err != nil {
@@ -259,10 +277,10 @@ func (m *Manager) Block(fp, id, name string, pids []int) (moved, flows int, err 
 	return moved, len(b.Flows) - n, nil
 }
 
-// capture moves pids and all their descendants into the quarantine group,
-// recording where each came from. It repeats until no new child appears,
-// since a process can fork while its parent is being moved.
-func (m *Manager) capture(b *Blocked, pids []int) int {
+// capture moves pids and all their descendants into group, recording
+// where each came from. It repeats until no new child appears, since a
+// process can fork while its parent is being moved.
+func (m *Manager) capture(b *Member, pids []int, group string) int {
 	moved := 0
 	want := map[int]bool{}
 	for _, p := range pids {
@@ -274,18 +292,20 @@ func (m *Manager) capture(b *Blocked, pids []int) int {
 				continue // never init or DevShield itself
 			}
 			cur := m.cgroupOf(pid)
-			if cur == "" || cur == "/"+QuarantineCgroup {
+			if cur == "" || cur == "/"+group {
 				continue
 			}
-			if err := os.WriteFile(filepath.Join(m.quarantineDir(), "cgroup.procs"), []byte(strconv.Itoa(pid)), 0); err != nil {
+			if err := os.WriteFile(filepath.Join(m.groupDir(group), "cgroup.procs"), []byte(strconv.Itoa(pid)), 0); err != nil {
 				continue // exited, or a kernel thread
 			}
-			b.Origins[pid] = cur
+			if !isDevShieldGroup(cur) { // keep the true origin when moving between our groups
+				b.Origins[pid] = cur
+			}
 			moved++
 		}
 		next := map[int]bool{}
 		for pid := range descendants(m.cfg.ProcRoot, keys(b.Origins)) {
-			if _, done := b.Origins[pid]; !done && m.cgroupOf(pid) != "/"+QuarantineCgroup {
+			if _, done := b.Origins[pid]; !done && m.cgroupOf(pid) != "/"+group {
 				next[pid] = true
 			}
 		}
@@ -295,7 +315,7 @@ func (m *Manager) capture(b *Blocked, pids []int) int {
 }
 
 // refreshFlows records the agent's sockets that predate the quarantine.
-func (m *Manager) refreshFlows(b *Blocked) {
+func (m *Manager) refreshFlows(b *Member) {
 	have := map[Flow]bool{}
 	for _, f := range b.Flows {
 		have[f] = true
@@ -313,26 +333,103 @@ func (m *Manager) refreshFlows(b *Blocked) {
 func (m *Manager) Unblock(fp string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	b := m.st.Blocked[fp]
-	if b == nil {
+	if m.st.Blocked[fp] == nil {
 		return errors.New("that agent is not blocked")
 	}
+	m.release(m.st.Blocked, fp, QuarantineCgroup)
+	if err := m.apply(); err != nil {
+		return err
+	}
+	return m.save()
+}
+
+// release moves fp's processes out of group back to where they came from
+// and forgets it (caller holds mu, then applies and saves).
+func (m *Manager) release(set map[string]*Member, fp, group string) {
+	b := set[fp]
 	if m.cgRoot != "" {
 		pp := parents(m.cfg.ProcRoot)
-		for _, pid := range m.members() {
+		for _, pid := range m.members(group) {
 			if origin, ok := originFor(pp, pid, b.Origins); ok {
 				m.moveTo(pid, origin)
 			}
 		}
 	}
-	delete(m.st.Blocked, fp)
-	if len(m.st.Blocked) == 0 && m.cgRoot != "" {
-		os.Remove(m.quarantineDir()) // fails (and the rule stays) while anything is still inside
+	delete(set, fp)
+	if len(set) == 0 && m.cgRoot != "" {
+		os.Remove(m.groupDir(group)) // fails (and the rule stays) while anything is still inside
 	}
+}
+
+// ── Allow ──
+
+// Allow lets an agent (and what it spawns) reach the network during a
+// lockdown. The caller decides whether the agent deserves it (DevShield's
+// daemon requires a sanctioned agent with a clean verdict).
+func (m *Manager) Allow(fp, id, name string, pids []int) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.cgRoot == "" {
+		return 0, errors.New("allowing single agents needs the cgroup v2 hierarchy (unified cgroups), which is not mounted on this system")
+	}
+	if m.st.Blocked[fp] != nil {
+		return 0, errors.New("that agent is blocked; unblock it first")
+	}
+	if err := os.MkdirAll(m.groupDir(AllowedCgroup), 0o755); err != nil {
+		return 0, err
+	}
+	b := m.st.Allowed[fp]
+	if b == nil {
+		b = &Member{ID: id, Name: name, Since: time.Now().UTC(), Origins: map[int]string{}}
+		m.st.Allowed[fp] = b
+	}
+	// The accept rule must exist before members are added (nft resolves
+	// the group when loading); moving first would only drop more, never less.
+	if err := m.apply(); err != nil {
+		delete(m.st.Allowed, fp)
+		if len(m.st.Allowed) == 0 {
+			os.Remove(m.groupDir(AllowedCgroup))
+		}
+		return 0, err
+	}
+	moved := m.capture(b, pids, AllowedCgroup)
+	return moved, m.save()
+}
+
+// Disallow withdraws an allow.
+func (m *Manager) Disallow(fp string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.st.Allowed[fp] == nil {
+		return errors.New("that agent is not allowed")
+	}
+	m.release(m.st.Allowed, fp, AllowedCgroup)
 	if err := m.apply(); err != nil {
 		return err
 	}
 	return m.save()
+}
+
+// IsAllowed reports whether fp is allowed.
+func (m *Manager) IsAllowed(fp string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.st.Allowed[fp] != nil
+}
+
+// AllowedFingerprints lists allowed agents.
+func (m *Manager) AllowedFingerprints() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]string, 0, len(m.st.Allowed))
+	for fp := range m.st.Allowed {
+		out = append(out, fp)
+	}
+	return out
+}
+
+func isDevShieldGroup(cg string) bool {
+	return cg == "/"+QuarantineCgroup || cg == "/"+AllowedCgroup
 }
 
 // moveTo puts pid back into origin, or the root group if origin is gone.
@@ -367,9 +464,20 @@ func (m *Manager) Reconcile(running map[string][]int) []string {
 		if err := os.MkdirAll(m.quarantineDir(), 0o755); err != nil {
 			continue
 		}
-		if m.capture(b, loose) > 0 {
+		if m.capture(b, loose, QuarantineCgroup) > 0 {
 			m.refreshFlows(b)
 			caught = append(caught, b.ID)
+		}
+	}
+	for fp, b := range m.st.Allowed {
+		var loose []int
+		for _, pid := range running[fp] {
+			if c := m.cgroupOf(pid); c != "" && c != "/"+AllowedCgroup {
+				loose = append(loose, pid)
+			}
+		}
+		if len(loose) > 0 && os.MkdirAll(m.groupDir(AllowedCgroup), 0o755) == nil && m.capture(b, loose, AllowedCgroup) > 0 {
+			changed = true // a restarted allowed agent may go out again
 		}
 	}
 	if len(caught) > 0 || changed {
@@ -391,6 +499,13 @@ func (m *Manager) Reconcile(running map[string][]int) []string {
 func (m *Manager) tidy() bool {
 	live := liveFlows(m.cfg.ProcRoot)
 	changed := false
+	for _, b := range m.st.Allowed {
+		for pid := range b.Origins {
+			if _, err := os.Stat(filepath.Join(m.cfg.ProcRoot, strconv.Itoa(pid))); err != nil {
+				delete(b.Origins, pid)
+			}
+		}
+	}
 	for _, b := range m.st.Blocked {
 		for pid := range b.Origins {
 			if _, err := os.Stat(filepath.Join(m.cfg.ProcRoot, strconv.Itoa(pid))); err != nil {
@@ -421,10 +536,23 @@ func (m *Manager) IsBlocked(fp string) bool {
 // ResolveBlocked maps a short id (prefix) to the fingerprint of a blocked
 // agent, so agents that are not running can still be unblocked.
 func (m *Manager) ResolveBlocked(id string) (string, bool) {
+	return m.resolveIn(id, false)
+}
+
+// ResolveAllowed is ResolveBlocked for allowed agents.
+func (m *Manager) ResolveAllowed(id string) (string, bool) {
+	return m.resolveIn(id, true)
+}
+
+func (m *Manager) resolveIn(id string, allowed bool) (string, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	set := m.st.Blocked
+	if allowed {
+		set = m.st.Allowed
+	}
 	var hit []string
-	for fp, b := range m.st.Blocked {
+	for fp, b := range set {
 		if fp == id || (id != "" && strings.HasPrefix(b.ID, strings.ToLower(id))) {
 			hit = append(hit, fp)
 		}
@@ -435,9 +563,9 @@ func (m *Manager) ResolveBlocked(id string) (string, bool) {
 	return "", false
 }
 
-// members lists pids currently in the quarantine group.
-func (m *Manager) members() []int {
-	data, err := os.ReadFile(filepath.Join(m.quarantineDir(), "cgroup.procs"))
+// members lists pids currently in group.
+func (m *Manager) members(group string) []int {
+	data, err := os.ReadFile(filepath.Join(m.groupDir(group), "cgroup.procs"))
 	if err != nil {
 		return nil
 	}
@@ -555,9 +683,14 @@ func (m *Manager) Status() Status {
 	for _, b := range m.st.Blocked {
 		st.Blocked = append(st.Blocked, BlockInfo{ID: b.ID, Name: b.Name, Since: b.Since, Flows: len(b.Flows)})
 	}
+	for _, b := range m.st.Allowed {
+		st.Allowed = append(st.Allowed, BlockInfo{ID: b.ID, Name: b.Name, Since: b.Since})
+	}
 	sort.Slice(st.Blocked, func(i, j int) bool { return st.Blocked[i].ID < st.Blocked[j].ID })
+	sort.Slice(st.Allowed, func(i, j int) bool { return st.Allowed[i].ID < st.Allowed[j].ID })
 	if m.cgRoot != "" {
-		st.QuarantinedProcs = len(m.members())
+		st.QuarantinedProcs = len(m.members(QuarantineCgroup))
+		st.AllowedProcs = len(m.members(AllowedCgroup))
 	}
 	return st
 }

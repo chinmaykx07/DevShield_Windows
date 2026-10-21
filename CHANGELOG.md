@@ -50,7 +50,12 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   with the expected ones) and restored within 10 s, and logged.
   `devshield-egress.service` loads the saved rules at boot before the
   network starts. Agents seen before can be blocked while not running.
-  Rules for closed sockets are dropped automatically. Tested live in
+  Rules for closed sockets are dropped automatically.
+  `sudo devshield allow|disallow <agent>` (the "Allow" step) lets a
+  sanctioned, clean agent out during a lockdown, including
+  `lockdown on --only-allowed`. The allow is withdrawn automatically if
+  the sanction is revoked, the binary changes or rogue behaviour appears.
+  Tested live in
   network namespaces (unified and hybrid cgroups); not yet with a real
   VPN/Tor setup or under systemd.
 - Tamper-evident, hash-chained audit log: edits, deletions, reordering and
