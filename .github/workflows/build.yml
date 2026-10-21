@@ -3,8 +3,10 @@ name: Build and Release
 # Triggers:
 #   Push a version tag (v0.1.0, v0.5.0 etc) → full build + sign + release
 #   Pull request → build only (verify it compiles, no release assets)
+#   Manual (Actions tab → Run workflow, any branch) → verify + live tests
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - main

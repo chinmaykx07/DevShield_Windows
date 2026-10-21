@@ -60,6 +60,15 @@ Go module `github.com/chinmaykx07/DevShield_Windows`, toolchain go1.27.3
 - Both systemd units pass `systemd-analyze verify`, which checks syntax
   and references only.
 
+**CI has never run successfully on this code.** The workflow was invalid
+(duplicate `push:` key) until `4cb9670`; since then it triggers only on
+`main`, tags, PRs into `main`, or by hand ("Run workflow" in the Actions
+tab, added after `222f667`). So the tests have never run natively on
+Windows, and the CI live-test job has never run on GitHub's runners.
+**First step of the next session:** ask the owner to run the workflow by
+hand on this branch (it uses their Actions minutes), then fix whatever
+fails.
+
 Unit-test coverage (`go test -cover`):
 
 | Package | Coverage |
@@ -279,7 +288,7 @@ Git and repo rules:
 ## 6. How the next session should run (to keep cost down)
 
 1. Start a **fresh session**. Read this file and only the files the
-   chosen item touches.
+   chosen item touches. Get CI green first (§2).
 2. Take **one item from §3**, starting with §3.1. If its design has open
    questions (§3.1 does: the account model), write a short design note
    and ask the owner before coding.

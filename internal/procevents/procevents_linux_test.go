@@ -7,6 +7,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // Every program start is delivered, including ones that exit at once
@@ -51,5 +53,16 @@ func TestEveryExecIsDelivered(t *testing.T) {
 	close(stop)
 	if err := <-done; err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Only the kernel may report process events; a message another program
+// sends to the socket is ignored.
+func TestOnlyKernelMessagesCount(t *testing.T) {
+	if !fromKernel(&unix.SockaddrNetlink{Family: unix.AF_NETLINK, Pid: 0}) {
+		t.Fatal("kernel message rejected")
+	}
+	if fromKernel(&unix.SockaddrNetlink{Family: unix.AF_NETLINK, Pid: 4242}) || fromKernel(nil) {
+		t.Fatal("message from a user process accepted")
 	}
 }

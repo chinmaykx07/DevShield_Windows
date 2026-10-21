@@ -85,7 +85,7 @@ func (l *Listener) Run(stop <-chan struct{}, onExec func(pid int32)) error {
 			return nil
 		default:
 		}
-		n, _, err := unix.Recvfrom(l.fd, buf, 0)
+		n, from, err := unix.Recvfrom(l.fd, buf, 0)
 		switch {
 		case errors.Is(err, unix.EAGAIN), errors.Is(err, unix.EINTR):
 			continue
@@ -94,6 +94,9 @@ func (l *Listener) Run(stop <-chan struct{}, onExec func(pid int32)) error {
 			continue
 		case err != nil:
 			return fmt.Errorf("proc connector: %w", err)
+		}
+		if !fromKernel(from) {
+			continue // only the kernel speaks for process events
 		}
 		msgs, err := syscall.ParseNetlinkMessage(buf[:n])
 		if err != nil {
@@ -105,6 +108,13 @@ func (l *Listener) Run(stop <-chan struct{}, onExec func(pid int32)) error {
 			}
 		}
 	}
+}
+
+// fromKernel: another local program can send to this socket; only
+// messages from the kernel (netlink port 0) are process events.
+func fromKernel(from unix.Sockaddr) bool {
+	nl, ok := from.(*unix.SockaddrNetlink)
+	return ok && nl.Pid == 0
 }
 
 // execPID reads a cn_msg carrying a proc_event: what (u32), cpu (u32),

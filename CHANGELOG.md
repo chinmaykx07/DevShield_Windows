@@ -108,7 +108,12 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   Inherited keys don't count, so a rogue can't launder its key by spawning
   children (a flaw found in live testing of the previous majority rule).
 - Built with patched Go 1.27.3: reachable known vulnerabilities went from
-  35 to 0. CI now runs vet, race tests and govulncheck on Linux and Windows.
+  35 to 0. CI is configured to run vet, race tests and govulncheck on
+  Linux and Windows, but has never run successfully: the workflow file
+  was invalid (two `push:` keys) until 4cb9670, and since then it runs
+  only on `main`, tags, pull requests into `main`, or by hand
+  (workflow_dispatch, added later). The Windows tests have never run
+  natively.
 
 ### Fixed
 - Agent Watch kept a process's old identity after it ran a new program

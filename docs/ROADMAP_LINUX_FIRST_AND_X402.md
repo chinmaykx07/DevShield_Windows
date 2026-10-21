@@ -126,7 +126,7 @@ It was started by Coinbase and is now governed by an x402 foundation. It has Go 
 4. **x402: see section 8.** The goal is owner sovereignty, not x402 for its own sake.
 
 ### Progress (2026-10-20)
-- ✅ Foundation: patched Go toolchain + CI verify job (vet, race tests, govulncheck; 35 → 0 reachable vulnerabilities).
+- ✅ Foundation: patched Go toolchain (35 → 0 reachable vulnerabilities). ⚠ The CI verify job (vet, race tests, govulncheck on Linux and Windows) is configured but has never run successfully; see `docs/HANDOFF.md` §2.
 - ✅ Hash-chained audit log (`internal/auditlog`).
 - ✅ Root daemon + kernel-authenticated socket + CLI (`internal/daemon`, `internal/ipc`, `cli.go`). A non-root self-sanction is refused and logged. Verified live with real users.
 - ✅ Hardened systemd unit (`packaging/linux/devshield.service`). Not yet run under systemd.
