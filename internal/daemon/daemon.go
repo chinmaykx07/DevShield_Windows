@@ -93,8 +93,17 @@ type Daemon struct {
 	netSeen *netwatch.Dedupe
 	stop    chan struct{}
 	closing atomic.Bool
+	lost    atomic.Int64 // events that could not be written since the last summary
+	lostAll atomic.Int64 // and in this run
 	started time.Time
 	tamper  bool
+	lock    *os.File // held while running: one daemon per state directory
+
+	bg             sync.WaitGroup // background loops, waited for before the log and database close
+	recMu          sync.Mutex     // one egress reconcile at a time
+	halted         bool           // under recMu: stopping, no more reconciles
+	storeErrLogged bool           // under recMu
+	stopOnce       sync.Once
 
 	limMu   sync.Mutex
 	limited map[denyKey]*window // per uid and kind: denied-event rate window
@@ -130,9 +139,7 @@ func Run(ctx context.Context, cfg Config) error {
 	if err != nil {
 		err = fmt.Errorf("listen on %s: %w", cfg.Socket, err)
 		d.event("DAEMON_START_FAILED", err.Error(), "fail")
-		d.closing.Store(true)
-		d.event("DAEMON_STOPPED", "stopped after a failed start", "fail")
-		d.shutdown()
+		d.stopWith("stopped after a failed start", "fail")
 		return err
 	}
 	defer d.close()
@@ -167,6 +174,12 @@ func start(cfg Config) (*Daemon, error) {
 	for _, uid := range cfg.Owners {
 		d.owners[uid] = true
 	}
+	// Before anything is written: a second daemon must not touch the log.
+	lock, err := lockState(cfg.StateDir)
+	if err != nil {
+		return nil, err
+	}
+	d.lock = lock
 
 	// ── Audit log: verify, and record tampering instead of going blind ──
 	al, info, err := auditlog.Open(d.logPath)
@@ -221,19 +234,41 @@ func start(cfg Config) (*Daemon, error) {
 	return d, nil
 }
 
-func (d *Daemon) close() {
+func (d *Daemon) close() { d.stopWith("clean shutdown", "ok") }
+
+// stopWith stops background work first (so nothing changes policy or uses
+// the database mid-stop), then records DAEMON_STOPPED as the last event.
+func (d *Daemon) stopWith(detail, status string) {
+	d.stopBackground()
 	d.flushAllSuppressed()
-	d.closing.Store(true) // later background events would make the next start report an unclean stop
-	d.event("DAEMON_STOPPED", "clean shutdown", "ok")
-	d.shutdown()
+	d.closing.Store(true) // later events would make the next start report an unclean stop
+	d.event("DAEMON_STOPPED", detail, status)
+	d.closeStores()
 }
 
 // shutdown stops everything without claiming a clean stop.
 func (d *Daemon) shutdown() {
-	close(d.stop)
-	d.watcher.Stop()
+	d.stopBackground()
+	d.closeStores()
+}
+
+func (d *Daemon) stopBackground() {
+	d.stopOnce.Do(func() {
+		close(d.stop)
+		d.watcher.Stop() // waits for a scan in progress
+		d.recMu.Lock()   // waits for a reconcile in progress
+		d.halted = true  // callbacks still in flight return at once
+		d.recMu.Unlock()
+		d.bg.Wait()
+	})
+}
+
+func (d *Daemon) closeStores() {
 	d.log.Close()
 	d.db.Close()
+	if d.lock != nil {
+		d.lock.Close()
+	}
 }
 
 func (d *Daemon) event(action, detail, status string) {
@@ -246,7 +281,15 @@ func (d *Daemon) eventFrom(action, detail, status, source string) {
 		return
 	}
 	if _, err := d.log.Append(action, detail, status, source); err != nil {
-		log.Printf("daemon: audit append failed: %v", err)
+		d.lost.Add(1)
+		d.lostAll.Add(1)
+		log.Printf("daemon: audit append failed, event lost: %s %s: %v", action, detail, err)
+		return
+	}
+	if n := d.lost.Swap(0); n > 0 {
+		if _, err := d.log.Append("AUDIT_EVENTS_LOST", fmt.Sprintf("%d event(s) before this one could not be written to the audit log (e.g. the disk was full) and are missing", n), "fail", "daemon"); err != nil {
+			d.lost.Add(n)
+		}
 	}
 }
 
@@ -457,6 +500,7 @@ func (d *Daemon) status() *ipc.Status {
 		Version:     d.cfg.Version,
 		UptimeSec:   int64(time.Since(d.started).Seconds()),
 		TamperSince: d.tamper,
+		LostEvents:  d.lostAll.Load(),
 	}
 	for _, a := range d.watcher.Running() {
 		st.Agents++

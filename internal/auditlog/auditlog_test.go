@@ -276,3 +276,34 @@ func TestAppendBetweenVerifyReadsIsNotTamper(t *testing.T) {
 		t.Fatalf("append between reads reported as tampering: %v", err)
 	}
 }
+
+// A write that fails midway (disk full) must not leave half a record that
+// the next append continues on the same line: that made a full disk look
+// like tampering.
+func TestFailedWriteLeavesNoPartialRecord(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.log")
+	l, _, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	if _, err := l.Append("EVENT", "first", "ok", "test"); err != nil {
+		t.Fatal(err)
+	}
+	old := writeRecord
+	writeRecord = func(f *os.File, b []byte) (int, error) {
+		n, _ := f.Write(b[:len(b)/2])
+		return n, errors.New("no space left on device")
+	}
+	_, err = l.Append("EVENT", "lost", "ok", "test")
+	writeRecord = old
+	if err == nil {
+		t.Fatal("failed write reported as success")
+	}
+	if _, err := l.Append("EVENT", "after", "ok", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := Verify(path); err != nil || n != 2 {
+		t.Fatalf("Verify = %d, %v (want 2 intact records)", n, err)
+	}
+}

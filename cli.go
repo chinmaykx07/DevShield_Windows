@@ -292,7 +292,10 @@ func cliStatus(socket string, stdout, stderr io.Writer) int {
 	if s.TamperSince {
 		fmt.Fprintln(stdout, "Warning: tampering with the audit log was detected when the daemon started.")
 	}
-	if s.Rogue > 0 || s.Risky > 0 || !s.LogIntact || s.TamperSince {
+	if s.LostEvents > 0 {
+		fmt.Fprintf(stdout, "Warning: %d event(s) could not be written to the audit log since the daemon started (disk full or I/O error) and are missing.\n", s.LostEvents)
+	}
+	if s.Rogue > 0 || s.Risky > 0 || !s.LogIntact || s.TamperSince || s.LostEvents > 0 {
 		return 3 // scripts/monitoring can alert on this
 	}
 	return 0
@@ -565,7 +568,7 @@ func cliEgress(args []string, socket string, stdout, stderr io.Writer) int {
 	} else {
 		printEgress(resp.Egress, stdout)
 	}
-	if !resp.Egress.RulesLoaded {
+	if !resp.Egress.RulesLoaded || resp.Egress.Unverifiable {
 		return 3
 	}
 	return 0
@@ -627,8 +630,11 @@ func printEgress(e *egress.Status, stdout io.Writer) {
 	if !e.CgroupV2 {
 		fmt.Fprintln(stdout, "  note: cgroup v2 is not mounted, so per-agent blocking is unavailable here")
 	}
-	if !e.RulesLoaded {
-		fmt.Fprintln(stdout, "  ⚠ the kernel does not have DevShield's firewall table loaded (the daemon re-applies it within 10 s)")
+	switch {
+	case !e.RulesLoaded:
+		fmt.Fprintln(stdout, "  ⚠ the kernel's DevShield rules are missing or were changed (the daemon re-applies them within 10 s)")
+	case e.Unverifiable:
+		fmt.Fprintln(stdout, "  ⚠ rules UNVERIFIED: this nft version lists them in a form DevShield can't compare with its own; it only checks they haven't changed since it loaded them")
 	}
 }
 

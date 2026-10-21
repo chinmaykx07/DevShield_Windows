@@ -17,7 +17,9 @@ const (
 func (d *Daemon) startNetwatch() {
 	d.netRes = &netwatch.Resolver{Interval: telemetryResolve}
 	d.netSeen = &netwatch.Dedupe{Window: telemetryRepeat}
+	d.bg.Add(1)
 	go func() {
+		defer d.bg.Done()
 		t := time.NewTicker(netInterval)
 		defer t.Stop()
 		for {

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -15,7 +16,8 @@ import (
 // Listen creates the daemon socket. The socket is connectable by any local
 // user (mode 0666) on purpose: every request is then authorized by the
 // kernel-reported peer uid, which a caller cannot fake. A stale socket
-// from a previous run is replaced.
+// from a previous run is replaced; one a running daemon still answers on
+// is not.
 func Listen(path string) (net.Listener, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, err
@@ -23,6 +25,10 @@ func Listen(path string) (net.Listener, error) {
 	if fi, err := os.Lstat(path); err == nil {
 		if fi.Mode()&os.ModeSocket == 0 {
 			return nil, fmt.Errorf("refusing to replace non-socket file %s", path)
+		}
+		if c, err := net.DialTimeout("unix", path, time.Second); err == nil {
+			c.Close()
+			return nil, fmt.Errorf("another DevShield daemon is already listening on %s", path)
 		}
 		_ = os.Remove(path)
 	}

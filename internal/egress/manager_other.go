@@ -21,12 +21,14 @@ type Config struct {
 	NftList    func() (string, error)
 	ProcStart  func(pid int) (int64, bool)
 	Emit       func(action, detail, status string)
+	NftBase    string
 }
 
 // Status is what the egress controls look like right now.
 type Status struct {
 	CgroupV2         bool        `json:"cgroup_v2"`
 	RulesLoaded      bool        `json:"rules_loaded"`
+	Unverifiable     bool        `json:"rules_unverifiable,omitempty"`
 	Blocked          []BlockInfo `json:"blocked,omitempty"`
 	Lockdown         *Lockdown   `json:"lockdown,omitempty"`
 	ConfirmBy        time.Time   `json:"confirm_by,omitempty"`

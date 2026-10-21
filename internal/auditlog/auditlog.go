@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"sync"
@@ -73,6 +74,9 @@ type Log struct {
 }
 
 func headPath(path string) string { return path + ".head" }
+
+// writeRecord writes one line; a variable so tests can make it fail midway.
+var writeRecord = func(f *os.File, b []byte) (int, error) { return f.Write(b) }
 
 // OpenInfo describes what Open found in an existing log.
 type OpenInfo struct {
@@ -175,10 +179,19 @@ func (l *Log) Append(action, detail, status, source string) (Record, error) {
 	if err != nil {
 		return Record{}, err
 	}
-	if _, err := l.f.Write(append(line, '\n')); err != nil {
+	// A failed write (disk full) can leave part of the line; a failed sync
+	// leaves a line the next append would duplicate the sequence number of.
+	// Either would break the chain, so cut the file back to where it was.
+	end, err := l.f.Seek(0, io.SeekEnd)
+	if err != nil {
+		return Record{}, err
+	}
+	if _, err := writeRecord(l.f, append(line, '\n')); err != nil {
+		l.f.Truncate(end)
 		return Record{}, err
 	}
 	if err := l.f.Sync(); err != nil {
+		l.f.Truncate(end)
 		return Record{}, err
 	}
 	// The record is durable: advance even if the head update fails (the

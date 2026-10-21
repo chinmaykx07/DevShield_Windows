@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/chinmaykx07/DevShield_Windows/internal/egress"
 	"github.com/chinmaykx07/DevShield_Windows/internal/ipc"
 )
 
@@ -57,5 +58,34 @@ func TestLockdownUnknownUserIsRefused(t *testing.T) {
 	}
 	if _, err := lockdownFrom(&ipc.LockdownRequest{}); err == nil {
 		t.Fatal("a lockdown that lets nothing out was accepted")
+	}
+}
+
+// A lasting problem is logged once, not every 10 s; a new error, a
+// recovery and a later relapse are each logged.
+func TestRulesHealthLogsChangesOnly(t *testing.T) {
+	var h rulesHealth
+	broken, other := errors.New("nft: not found"), errors.New("nft: permission denied")
+	steps := []struct {
+		again bool
+		err   error
+		want  string
+	}{
+		{true, broken, "EGRESS_RULES_MISSING"},
+		{true, broken, ""},
+		{true, broken, ""},
+		{true, other, "EGRESS_RULES_MISSING"},
+		{true, nil, "EGRESS_RULES_RESTORED"},
+		{false, nil, ""},
+		{false, egress.ErrUnverifiable, "EGRESS_RULES_UNVERIFIABLE"},
+		{false, egress.ErrUnverifiable, ""},
+		{true, broken, "EGRESS_RULES_MISSING"},
+		{false, nil, ""},
+		{true, broken, "EGRESS_RULES_MISSING"},
+	}
+	for i, s := range steps {
+		if got, _, _ := h.next(s.again, s.err); got != s.want {
+			t.Fatalf("step %d: got %q, want %q", i, got, s.want)
+		}
 	}
 }

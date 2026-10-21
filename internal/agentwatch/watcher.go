@@ -20,9 +20,11 @@
 package agentwatch
 
 import (
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -95,7 +97,14 @@ type Config struct {
 	// CatalogOverride is an optional catalog file that replaces the built-in
 	// one. It must only be writable by a trusted user (root in the daemon).
 	CatalogOverride string
+	// Lookup resolves an LLM API host name. nil = the system resolver.
+	Lookup func(ctx context.Context, host string) ([]string, error)
 }
+
+// llmLookupTimeout bounds each LLM host lookup. During a lockdown DNS
+// outside the tunnel is dropped, and an unbounded lookup used to stall
+// every scan for the resolver's full timeout.
+const llmLookupTimeout = 3 * time.Second
 
 // Watcher scans processes for AI agents and judges them.
 type Watcher struct {
@@ -109,6 +118,7 @@ type Watcher struct {
 	llmIPs      map[string]string // ip → LLM API host
 	conns       []Conn            // every established TCP connection, last scan
 	resolvedAt  time.Time
+	resolving   bool // a background LLM host refresh is running
 	autostart   map[string]string
 	autostartAt time.Time
 
@@ -119,6 +129,7 @@ type Watcher struct {
 	alerted   map[string]string // fingerprint → verdict+risks last alerted
 
 	stopOnce sync.Once
+	loops    sync.WaitGroup // the scan loops, waited for by Stop
 	stopCh   chan struct{}
 }
 
@@ -155,14 +166,17 @@ func New(cfg Config) (*Watcher, error) {
 
 // Start begins the fast spawn tick and the periodic scan.
 func (w *Watcher) Start() {
-	go w.runSpawnTicker()
-	go w.run()
+	w.loops.Add(2)
+	go func() { defer w.loops.Done(); w.runSpawnTicker() }()
+	go func() { defer w.loops.Done(); w.run() }()
 	log.Printf("agentwatch: started (catalog %s, %d agents)", w.catalog.Version, len(w.catalog.Agents))
 }
 
-// Stop ends scanning. Safe to call more than once.
+// Stop ends scanning and waits for a scan in progress to finish, so the
+// database can be closed afterwards. Safe to call more than once.
 func (w *Watcher) Stop() {
 	w.stopOnce.Do(func() { close(w.stopCh) })
+	w.loops.Wait()
 }
 
 // Catalog returns the catalog in use.
@@ -603,32 +617,41 @@ func (w *Watcher) LLMHost(ip string) string {
 
 // refreshLLMIPs resolves the catalog's LLM API hosts so connections can be
 // matched by IP. Shared CDN IPs make this a weak signal on its own, which
-// is why it only adds 2 points in agentScore.
+// is why it only adds 2 points in agentScore. It runs in the background:
+// a scan never waits for DNS.
 func (w *Watcher) refreshLLMIPs(cat *AgentCatalog) {
-	w.mu.RLock()
-	fresh := time.Since(w.resolvedAt) < llmResolveInterval
-	w.mu.RUnlock()
-	if fresh {
+	w.mu.Lock()
+	if w.resolving || time.Since(w.resolvedAt) < llmResolveInterval {
+		w.mu.Unlock()
 		return
 	}
-
-	ips := map[string]string{}
-	for _, host := range cat.LLMAPIHosts {
-		addrs, err := net.LookupHost(host)
-		if err != nil {
-			continue
-		}
-		for _, a := range addrs {
-			ips[a] = host
-		}
-	}
-
-	w.mu.Lock()
-	w.resolvedAt = time.Now()
-	if len(ips) > 0 { // offline → keep the last good set
-		w.llmIPs = ips
-	}
+	w.resolving = true
 	w.mu.Unlock()
+	lookup := w.cfg.Lookup
+	if lookup == nil {
+		lookup = net.DefaultResolver.LookupHost
+	}
+	hosts := append([]string(nil), cat.LLMAPIHosts...)
+	go func() {
+		ips := map[string]string{}
+		for _, host := range hosts {
+			ctx, cancel := context.WithTimeout(context.Background(), llmLookupTimeout)
+			addrs, err := lookup(ctx, host)
+			cancel()
+			if err != nil {
+				continue
+			}
+			for _, a := range addrs {
+				ips[a] = host
+			}
+		}
+		w.mu.Lock()
+		w.resolvedAt, w.resolving = time.Now(), false
+		if len(ips) > 0 { // offline → keep the last good set
+			w.llmIPs = ips
+		}
+		w.mu.Unlock()
+	}()
 }
 
 func (w *Watcher) refreshAutostart() {
@@ -795,20 +818,21 @@ func (w *Watcher) ResolveKnown(id string) (fingerprint, name, short string, err 
 
 // StoredStatus is fp's sanction status in the agent database ("" if never
 // seen). Unlike a running agent's Verdict it says nothing about behaviour.
-func (w *Watcher) StoredStatus(fp string) string {
+// A database error is returned, never read as "not sanctioned".
+func (w *Watcher) StoredStatus(fp string) (string, error) {
 	if w.cfg.DB == nil {
-		return ""
+		return "", errors.New("no agent database")
 	}
 	recs, err := listAgents(w.cfg.DB)
 	if err != nil {
-		return ""
+		return "", err
 	}
 	for _, r := range recs {
 		if r.Fingerprint == fp {
-			return r.Status
+			return r.Status, nil
 		}
 	}
-	return ""
+	return "", nil
 }
 
 // OnChange registers a callback fired when the running set, a verdict or

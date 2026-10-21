@@ -371,19 +371,36 @@ func TestResetUndoesEverything(t *testing.T) {
 }
 
 // If nft lists rules in a form DevShield can't compare, that must be said
-// (once) instead of blaming another program every 10 s.
+// instead of blaming another program (and re-loading) every 10 s. A change
+// after loading must still be caught.
 func TestIncomparableListingIsUnverifiable(t *testing.T) {
 	nft := &fakeNft{}
+	listing := "table inet devshield {\n\tchain egress {\n\t\tsomething else\n\t}\n}\n"
+	var mu sync.Mutex
 	m, err := New(Config{StateDir: t.TempDir(), ProcRoot: t.TempDir(), Nft: nft.run,
-		NftList: func() (string, error) {
-			return "table inet devshield {\n\tchain egress {\n\t\tsomething else\n\t}\n}\n", nil
-		}})
+		NftList: func() (string, error) { mu.Lock(); defer mu.Unlock(); return listing, nil }})
 	if err != nil {
 		t.Fatal(err)
 	}
 	m.LockdownOn(wg0, 0)
-	if again, err := m.EnsureLoaded(); !again || !errors.Is(err, ErrUnverifiable) {
-		t.Fatalf("EnsureLoaded = %v, %v", again, err)
+	loads := len(nft.loaded)
+	if again, err := m.EnsureLoaded(); again || !errors.Is(err, ErrUnverifiable) {
+		t.Fatalf("unchanged: EnsureLoaded = %v, %v", again, err)
+	}
+	if len(nft.loaded) != loads {
+		t.Fatal("re-loaded rules that had not changed")
+	}
+	if st := m.Status(); !st.RulesLoaded || !st.Unverifiable {
+		t.Fatalf("status: loaded=%v unverifiable=%v", st.RulesLoaded, st.Unverifiable)
+	}
+	mu.Lock()
+	listing = strings.Replace(listing, "something else", "something changed", 1) // tampered
+	mu.Unlock()
+	if st := m.Status(); st.RulesLoaded {
+		t.Fatal("a change after loading was not noticed")
+	}
+	if again, err := m.EnsureLoaded(); !again || err != nil || len(nft.loaded) != loads+1 {
+		t.Fatalf("changed: EnsureLoaded = %v, %v (loads %d)", again, err, len(nft.loaded)-loads)
 	}
 }
 

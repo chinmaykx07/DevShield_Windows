@@ -147,10 +147,9 @@ func TestUncleanStopAndTamperAreReportedOnNextStart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Simulate being killed: no close(), so no DAEMON_STOPPED record.
-	d.watcher.Stop()
-	d.log.Close()
-	d.db.Close()
+	// Simulate being killed: no close(), so no DAEMON_STOPPED record (the
+	// kernel would also drop the state lock; shutdown releases it).
+	d.shutdown()
 
 	d2, err := start(cfg)
 	if err != nil {
@@ -261,5 +260,19 @@ func TestDenialLoggingCannotBeDrowned(t *testing.T) {
 	}
 	if summaries != 2 {
 		t.Errorf("summaries = %d, want 2 (one per kind)", summaries)
+	}
+}
+
+// Two daemons on one state directory would append to the same audit log
+// and break its hash chain. The second must refuse before writing.
+func TestSecondDaemonOnSameStateIsRefused(t *testing.T) {
+	d, _ := startTestDaemon(t)
+	before, _ := os.ReadFile(d.logPath)
+	_, err := start(d.cfg)
+	if err == nil || !strings.Contains(err.Error(), "already running") {
+		t.Fatalf("second start: %v", err)
+	}
+	if after, _ := os.ReadFile(d.logPath); string(after) != string(before) {
+		t.Fatalf("second daemon wrote to the audit log:\n%s", after[len(before):])
 	}
 }

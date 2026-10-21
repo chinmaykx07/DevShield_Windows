@@ -87,7 +87,10 @@ type Status struct {
 	LogProblem string `json:"log_problem,omitempty"`
 	// LogUnchecked: verification could not run (I/O error): not a tamper finding.
 	LogUnchecked bool `json:"log_unchecked,omitempty"`
-	TamperSince  bool `json:"tamper_detected_this_run"`
+	// LostEvents: events this daemon run could not write to the log (e.g.
+	// disk full). They are gone; the log itself is still intact.
+	LostEvents  int64 `json:"lost_events,omitempty"`
+	TamperSince bool  `json:"tamper_detected_this_run"`
 }
 
 // Thermal describes thermal controls and state.

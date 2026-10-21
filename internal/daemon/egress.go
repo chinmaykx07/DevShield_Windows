@@ -17,6 +17,10 @@ import (
 // and the kernel ruleset is verified (another tool may have flushed it).
 const egressInterval = 10 * time.Second
 
+// beforeWithdraw runs between reading the allowed agents and withdrawing
+// one (tests use it to make a concurrent "disallow" land exactly there).
+var beforeWithdraw = func(fp string) {}
+
 // torUsers are the Tor daemon's account names across distributions.
 var torUsers = []string{"debian-tor", "tor", "toranon", "_tor"}
 
@@ -33,10 +37,12 @@ func (d *Daemon) startEgress() {
 		return
 	}
 	d.watcher.OnChange(d.reconcileEgress)
+	d.bg.Add(1)
 	go func() {
+		defer d.bg.Done()
 		t := time.NewTicker(egressInterval)
 		defer t.Stop()
-		unverifiable := false
+		var h rulesHealth
 		for {
 			select {
 			case <-d.stop:
@@ -44,28 +50,56 @@ func (d *Daemon) startEgress() {
 			case <-t.C:
 				d.reconcileEgress()
 				again, err := m.EnsureLoaded()
-				switch {
-				case !again:
-					unverifiable = false
-				case errors.Is(err, egress.ErrUnverifiable):
-					if !unverifiable { // say it once, not every 10 s
-						d.event("EGRESS_RULES_UNVERIFIABLE", err.Error(), "warn")
-						unverifiable = true
-					}
-				case err != nil:
-					d.event("EGRESS_RULES_MISSING", "DevShield's firewall rules did not match what it loaded and could not be re-applied: "+err.Error(), "fail")
-				default:
-					d.event("EGRESS_RULES_RESTORED", "DevShield's firewall rules did not match what it loaded (removed or changed by another program or by hand) and were re-applied", "warn")
+				if action, detail, status := h.next(again, err); action != "" {
+					d.event(action, detail, status)
 				}
 			}
 		}
 	}()
 }
 
+// rulesHealth turns each 10-second rule check into at most one event per
+// change of state, so a lasting problem (nft removed, rules that can't be
+// compared) is logged once, not 8,640 times a day.
+type rulesHealth struct {
+	unverifiable bool
+	failing      string // the error last logged as EGRESS_RULES_MISSING
+}
+
+func (h *rulesHealth) next(again bool, err error) (action, detail, status string) {
+	switch {
+	case errors.Is(err, egress.ErrUnverifiable):
+		h.failing = ""
+		if !h.unverifiable {
+			h.unverifiable = true
+			return "EGRESS_RULES_UNVERIFIABLE", err.Error(), "warn"
+		}
+	case !again:
+		h.unverifiable, h.failing = false, ""
+	case err != nil:
+		h.unverifiable = false
+		if h.failing != err.Error() {
+			h.failing = err.Error()
+			return "EGRESS_RULES_MISSING", "DevShield's firewall rules are missing or were changed, and could not be re-applied: " + err.Error() + " (logged again only if the error changes)", "fail"
+		}
+	default:
+		h.unverifiable, h.failing = false, ""
+		return "EGRESS_RULES_RESTORED", "DevShield's firewall rules were missing or had been changed (by another program or by hand) and were re-applied", "warn"
+	}
+	return "", "", ""
+}
+
 // reconcileEgress re-quarantines blocked agents that were restarted, and
 // suspends the network allowance of any allowed agent that no longer
 // deserves it (sanction revoked, binary replaced, or rogue behaviour).
+// Runs from the ticker and from Agent Watch callbacks: one at a time, and
+// never once the daemon is stopping.
 func (d *Daemon) reconcileEgress() {
+	d.recMu.Lock()
+	defer d.recMu.Unlock()
+	if d.halted {
+		return
+	}
 	running := map[string][]egress.Proc{}
 	verdict := map[string]string{}
 	for _, a := range d.watcher.Running() {
@@ -76,14 +110,30 @@ func (d *Daemon) reconcileEgress() {
 		why := ""
 		if v, ok := verdict[fp]; ok && v != agentwatch.VerdictSanctioned {
 			why = "its verdict is now " + v
-		} else if !ok && d.watcher.StoredStatus(fp) != agentwatch.AgentSanctioned {
-			why = "it is no longer sanctioned"
+		} else if !ok {
+			st, err := d.watcher.StoredStatus(fp)
+			if err != nil {
+				// Unknown is not "revoked": keep the allowance (it only
+				// matters during a lockdown) and look again next time.
+				if !d.storeErrLogged {
+					d.event("EGRESS_CHECK_FAILED", fmt.Sprintf("could not read the agent database to re-check the network allowance of %s, so it was kept: %v", agentwatch.ShortID(fp), err), "warn")
+					d.storeErrLogged = true
+				}
+				continue
+			}
+			if st != agentwatch.AgentSanctioned {
+				why = "it is no longer sanctioned"
+			}
 		}
 		if why == "" {
 			continue
 		}
+		beforeWithdraw(fp)
 		note, err := d.egress.Disallow(fp)
 		if err != nil {
+			if !d.egress.IsAllowed(fp) {
+				continue // withdrawn meanwhile (by "disallow"): nothing failed
+			}
 			d.event("EGRESS_FAILED", fmt.Sprintf("could not withdraw the network allowance of %s (%s): %v — it may still go out during a lockdown", agentwatch.ShortID(fp), why, err), "fail")
 			continue
 		}
@@ -140,8 +190,14 @@ func (d *Daemon) setAllow(op, id string, peer ipc.Peer) ipc.Response {
 		}
 		pids = procsOf(a)
 	}
-	if pids == nil && d.watcher.StoredStatus(fp) != agentwatch.AgentSanctioned {
-		return ipc.Response{Error: fmt.Sprintf("%s is not sanctioned: sudo devshield sanction %s first", short, short)}
+	if pids == nil {
+		st, err := d.watcher.StoredStatus(fp)
+		if err != nil {
+			return ipc.Response{Error: "could not read the agent database: " + err.Error()}
+		}
+		if st != agentwatch.AgentSanctioned {
+			return ipc.Response{Error: fmt.Sprintf("%s is not sanctioned: sudo devshield sanction %s first", short, short)}
+		}
 	}
 	moved, err := d.egress.Allow(fp, short, name, pids)
 	if err != nil {

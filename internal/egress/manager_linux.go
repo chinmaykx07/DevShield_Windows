@@ -33,11 +33,15 @@ type Config struct {
 	// gopsutil reports it; ok=false if it is gone. nil = gopsutil.
 	ProcStart func(pid int) (start int64, ok bool)
 	Emit      func(action, detail, status string)
+	// NftBase is where nft resolves cgroup paths; "" = /sys/fs/cgroup.
+	// Only tests with a fake cgroup tree change it.
+	NftBase string
 }
 
 // Proc is a process to act on, as identified by Agent Watch. Start (its
 // creation time; 0 = unknown) is re-checked before anything is done, so a
-// PID reused since the scan is never touched.
+// PID reused since the scan is not touched (with Start 0, the PID alone is
+// checked).
 type Proc struct {
 	PID   int
 	Start int64
@@ -70,12 +74,18 @@ type Manager struct {
 	prevLock  *Lockdown // restored if a pending lockdown is not confirmed
 	gen       int       // bumped on every lockdown change; a stale timer must not revert a newer one
 	corrupt   error     // the saved state could not be read: keep the kernel as it is
+	// loadedCanon is how nft listed the rules right after DevShield loaded
+	// them, kept only when that listing can't be compared with DevShield's
+	// own script (another nft version). Tampering is then judged against
+	// it: unchanged since loading = loaded, but unverified.
+	loadedCanon []string
 }
 
 // Status is what the egress controls look like right now.
 type Status struct {
 	CgroupV2         bool        `json:"cgroup_v2"`
 	RulesLoaded      bool        `json:"rules_loaded"`
+	Unverifiable     bool        `json:"rules_unverifiable,omitempty"` // loaded, unchanged since, but not comparable with DevShield's script
 	Blocked          []BlockInfo `json:"blocked,omitempty"`
 	Lockdown         *Lockdown   `json:"lockdown,omitempty"`
 	ConfirmBy        time.Time   `json:"confirm_by,omitempty"`
@@ -113,6 +123,9 @@ func New(cfg Config) (*Manager, error) {
 	}
 	m := &Manager{cfg: cfg, st: state{Blocked: map[string]*Member{}, Allowed: map[string]*Member{}}}
 	m.cgRoot, m.nftBase = cfg.CgroupRoot, nftCgroupBase
+	if cfg.NftBase != "" {
+		m.nftBase = cfg.NftBase
+	}
 	if m.cgRoot == "" {
 		m.cgRoot = findCgroup2(cfg.ProcRoot)
 	}
@@ -242,7 +255,16 @@ func (m *Manager) apply() error {
 	if err := m.cfg.Nft(script, true); err != nil {
 		return fmt.Errorf("nft rejected the ruleset, nothing changed: %w", err)
 	}
-	return m.cfg.Nft(script, false)
+	if err := m.cfg.Nft(script, false); err != nil {
+		return err
+	}
+	m.loadedCanon = nil
+	if have, err := m.cfg.NftList(); err == nil {
+		if hc := canonRules(have); !slices.Equal(canonRules(script), hc) {
+			m.loadedCanon = hc
+		}
+	}
+	return nil
 }
 
 func (m *Manager) save() error {
@@ -259,11 +281,39 @@ func (m *Manager) save() error {
 	if err := os.MkdirAll(m.cfg.StateDir, 0o700); err != nil {
 		return err
 	}
-	tmp := m.statePath() + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+	return writeDurable(m.statePath(), data)
+}
+
+// writeDurable replaces path so that after a crash or power cut it holds
+// either the old or the new content, never an empty or partial file: the
+// boot-time unit loads the rules from it, and an unreadable file means
+// none are loaded.
+func writeDurable(path string, data []byte) error {
+	tmp := path + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, m.statePath())
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return err
+	}
+	dir, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync() // make the rename itself durable
 }
 
 // ── Quarantine ──
@@ -895,9 +945,10 @@ func (m *Manager) Reset() ([]string, error) {
 func (m *Manager) Status() Status {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	st := Status{CgroupV2: m.cgRoot != "", Lockdown: m.st.Lockdown, RulesLoaded: m.rulesLoaded()}
+	st := Status{CgroupV2: m.cgRoot != "", Lockdown: m.st.Lockdown}
+	st.RulesLoaded, st.Unverifiable = m.rulesState()
 	if m.corrupt != nil {
-		st.Problem, st.RulesLoaded = m.corrupt.Error(), false
+		st.Problem, st.RulesLoaded, st.Unverifiable = m.corrupt.Error(), false, false
 	}
 	if m.pending != nil {
 		st.ConfirmBy = m.pendingBy
@@ -923,16 +974,31 @@ func (m *Manager) Status() Status {
 // address, port, group, user or verdict — is noticed. With nothing to
 // enforce, the table must be absent.
 func (m *Manager) rulesLoaded() bool {
+	ok, _ := m.rulesState()
+	return ok
+}
+
+// rulesState says whether the kernel holds the rules DevShield expects.
+// unverified: they can't be compared with DevShield's script, but they are
+// exactly as nft listed them right after DevShield loaded them.
+func (m *Manager) rulesState() (loaded, unverified bool) {
 	p := m.policy()
 	have, listErr := m.cfg.NftList()
 	if p.Empty() {
-		return listErr != nil // no table expected
+		return listErr != nil, false // no table expected
 	}
 	want, err := Render(p)
 	if err != nil || listErr != nil {
-		return false
+		return false, false
 	}
-	return slices.Equal(canonRules(want), canonRules(have))
+	hc := canonRules(have)
+	if slices.Equal(canonRules(want), hc) {
+		return true, false
+	}
+	if m.loadedCanon != nil && slices.Equal(m.loadedCanon, hc) {
+		return true, true
+	}
+	return false, false
 }
 
 var (
@@ -971,26 +1037,28 @@ func canonRules(table string) []string {
 
 // EnsureLoaded re-applies the ruleset if something removed or altered it
 // (e.g. a firewall service ran "flush ruleset"). It reports whether it had to.
+//
+// It returns again=false with ErrUnverifiable while the rules are loaded
+// and unchanged but can't be compared with DevShield's script.
 func (m *Manager) EnsureLoaded() (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.corrupt != nil || m.rulesLoaded() {
+	if m.corrupt != nil {
 		return false, nil
 	}
-	if err := m.apply(); err != nil {
-		return true, err
+	if loaded, unverified := m.rulesState(); loaded {
+		if unverified {
+			return false, ErrUnverifiable
+		}
+		return false, nil
 	}
-	if !m.rulesLoaded() {
-		// Just loaded, still "different": nft lists them in a form this
-		// version of DevShield can't compare, so tampering can't be judged.
-		return true, ErrUnverifiable
-	}
-	return true, nil
+	return true, m.apply()
 }
 
-// ErrUnverifiable: the rules are loaded but can't be compared with nft's
-// listing (e.g. a different nft version prints them differently).
-var ErrUnverifiable = errors.New("the rules were loaded, but this nft version lists them in a form DevShield can't compare, so tampering can't be detected here")
+// ErrUnverifiable: the rules are loaded but can't be compared with
+// DevShield's own script (e.g. a different nft version lists them
+// differently). Changes after loading are still detected.
+var ErrUnverifiable = errors.New("this nft version lists DevShield's rules in a form DevShield can't compare with what it loaded, so it can only check that they haven't changed since it loaded them")
 
 // ── helpers ──
 
