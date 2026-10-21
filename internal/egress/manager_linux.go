@@ -126,9 +126,12 @@ func New(cfg Config) (*Manager, error) {
 			// (a lockdown must not silently open), and every change except
 			// restore-all is refused until the owner decides.
 			aside := fmt.Sprintf("%s.corrupt-%d", m.statePath(), time.Now().Unix())
-			os.Rename(m.statePath(), aside)
+			kept := "kept as " + aside
+			if rerr := os.Rename(m.statePath(), aside); rerr != nil {
+				aside, kept = m.statePath(), "left in place: "+rerr.Error()
+			}
 			m.st = state{Blocked: map[string]*Member{}, Allowed: map[string]*Member{}}
-			m.corrupt = fmt.Errorf("network state file was unreadable (%v; kept as %s). The rules already in the kernel stay as they are; run 'sudo devshield restore-all' to start clean", err, aside)
+			m.corrupt = fmt.Errorf("network state file was unreadable (%v; %s). DevShield doesn't know which lockdown or blocks you had: the rules already in the kernel (if any) stay as they are, but after a reboot none are loaded. Run 'sudo devshield restore-all' to start clean", err, kept)
 			return m, m.corrupt
 		}
 		if m.st.Blocked == nil {
@@ -377,32 +380,32 @@ func (m *Manager) refreshFlows(b *Member) {
 
 // Unblock restores the agent's network access and moves its processes
 // back to the groups they came from.
-func (m *Manager) Unblock(fp string) error {
+// It returns a note when some processes could not be put back cleanly.
+func (m *Manager) Unblock(fp string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.corrupt != nil {
-		return m.corrupt
+		return "", m.corrupt
 	}
 	if m.st.Blocked[fp] == nil {
-		return errors.New("that agent is not blocked")
+		return "", errors.New("that agent is not blocked")
 	}
-	m.release(m.st.Blocked, fp, QuarantineCgroup)
+	note := releaseNote(m.release(m.st.Blocked, fp, QuarantineCgroup))
 	if err := m.apply(); err != nil {
-		return err
+		return note, err
 	}
-	return m.save()
+	return note, m.save()
 }
 
 // release moves fp's processes out of group back to where they came from
 // and forgets it (caller holds mu, then applies and saves).
-func (m *Manager) release(set map[string]*Member, fp, group string) {
+func (m *Manager) release(set map[string]*Member, fp, group string) (fellBack, orphans, kept int) {
 	b := set[fp]
 	delete(set, fp)
 	if m.cgRoot == "" {
 		return
 	}
 	pp := parents(m.cfg.ProcRoot)
-	fellBack, orphans := 0, 0
 	for _, pid := range m.members(group) {
 		if origin, ok := originFor(pp, pid, b.Origins); ok {
 			if !m.moveTo(pid, origin) {
@@ -411,7 +414,8 @@ func (m *Manager) release(set map[string]*Member, fp, group string) {
 			continue
 		}
 		if group != AllowedCgroup {
-			continue // unknown processes stay quarantined: fail closed
+			kept++ // untraceable: stays quarantined (fail closed)
+			continue
 		}
 		// In the allowed group an untraceable process (e.g. a helper that
 		// daemonized) must not keep the allowance unless another allowed
@@ -434,9 +438,28 @@ func (m *Manager) release(set map[string]*Member, fp, group string) {
 	if orphans > 0 {
 		m.cfg.Emit("EGRESS_RELEASE_ORPHANS", fmt.Sprintf("%d untraceable process(es) left the allowed group with %s and lost the allowance", orphans, b.ID), "warn")
 	}
+	if kept > 0 {
+		m.cfg.Emit("EGRESS_RELEASE_KEPT", fmt.Sprintf("%d process(es) still in quarantine could not be traced to %s and stay cut off (end them, or run restore-all)", kept, b.ID), "warn")
+	}
 	if len(set) == 0 {
 		os.Remove(m.groupDir(group)) // fails (and the rule stays) while anything is still inside
 	}
+	return fellBack, orphans, kept
+}
+
+// releaseNote describes what a release could not do cleanly ("" if all went back).
+func releaseNote(fellBack, orphans, kept int) string {
+	var parts []string
+	if fellBack > 0 {
+		parts = append(parts, fmt.Sprintf("%d process(es) went to the root cgroup instead of their own", fellBack))
+	}
+	if orphans > 0 {
+		parts = append(parts, fmt.Sprintf("%d untraceable process(es) lost the allowance", orphans))
+	}
+	if kept > 0 {
+		parts = append(parts, fmt.Sprintf("%d untraceable process(es) stay quarantined", kept))
+	}
+	return strings.Join(parts, "; ")
 }
 
 // ── Allow ──
@@ -478,20 +501,34 @@ func (m *Manager) Allow(fp, id, name string, pids []Proc) (int, error) {
 }
 
 // Disallow withdraws an allow.
-func (m *Manager) Disallow(fp string) error {
+func (m *Manager) Disallow(fp string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.corrupt != nil {
-		return m.corrupt
+		return "", m.corrupt
 	}
 	if m.st.Allowed[fp] == nil {
-		return errors.New("that agent is not allowed")
+		return "", errors.New("that agent is not allowed")
 	}
-	m.release(m.st.Allowed, fp, AllowedCgroup)
+	note := releaseNote(m.release(m.st.Allowed, fp, AllowedCgroup))
 	if err := m.apply(); err != nil {
-		return err
+		return note, err
 	}
-	return m.save()
+	return note, m.save()
+}
+
+// NotQuarantined counts pids that are NOT inside the quarantine group, so
+// "blocked" can be shown as a fact, not just a decision.
+func (m *Manager) NotQuarantined(pids []int) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := 0
+	for _, pid := range pids {
+		if c := m.cgroupOf(pid); c != "" && c != "/"+QuarantineCgroup {
+			n++
+		}
+	}
+	return n
 }
 
 // IsAllowed reports whether fp is allowed.
@@ -797,12 +834,18 @@ func (m *Manager) Reset() ([]string, error) {
 		did = append(did, "lockdown ended")
 	}
 	for fp, b := range m.st.Blocked {
-		m.release(m.st.Blocked, fp, QuarantineCgroup)
-		did = append(did, "unblocked "+b.ID)
+		msg := "unblocked " + b.ID
+		if note := releaseNote(m.release(m.st.Blocked, fp, QuarantineCgroup)); note != "" {
+			msg += " (" + note + ")"
+		}
+		did = append(did, msg)
 	}
 	for fp, b := range m.st.Allowed {
-		m.release(m.st.Allowed, fp, AllowedCgroup)
-		did = append(did, "disallowed "+b.ID)
+		msg := "disallowed " + b.ID
+		if note := releaseNote(m.release(m.st.Allowed, fp, AllowedCgroup)); note != "" {
+			msg += " (" + note + ")"
+		}
+		did = append(did, msg)
 	}
 	// A group can outlive the state that explains it (crash, deleted state
 	// file, a process that could not be moved back). Its rule would keep
@@ -930,8 +973,20 @@ func (m *Manager) EnsureLoaded() (bool, error) {
 	if m.corrupt != nil || m.rulesLoaded() {
 		return false, nil
 	}
-	return true, m.apply()
+	if err := m.apply(); err != nil {
+		return true, err
+	}
+	if !m.rulesLoaded() {
+		// Just loaded, still "different": nft lists them in a form this
+		// version of DevShield can't compare, so tampering can't be judged.
+		return true, ErrUnverifiable
+	}
+	return true, nil
 }
+
+// ErrUnverifiable: the rules are loaded but can't be compared with nft's
+// listing (e.g. a different nft version prints them differently).
+var ErrUnverifiable = errors.New("the rules were loaded, but this nft version lists them in a form DevShield can't compare, so tampering can't be detected here")
 
 // ── helpers ──
 

@@ -69,20 +69,25 @@ type Agent struct {
 	Reasons   []string `json:"reasons,omitempty"`
 	Risks     []string `json:"risks,omitempty"`
 	Blocked   bool     `json:"network_blocked,omitempty"`
-	Allowed   bool     `json:"network_allowed,omitempty"`
+	// NotYetCut: blocked, but this many of its processes are not inside the
+	// quarantine yet (caught at the next scan).
+	NotYetCut int  `json:"not_yet_cut,omitempty"`
+	Allowed   bool `json:"network_allowed,omitempty"`
 }
 
 // Status summarises the daemon's health.
 type Status struct {
-	Version     string `json:"version"`
-	UptimeSec   int64  `json:"uptime_sec"`
-	Agents      int    `json:"agents"`
-	Rogue       int    `json:"rogue"`
-	Risky       int    `json:"risky"`
-	LogRecords  int    `json:"log_records"`
-	LogIntact   bool   `json:"log_intact"`
-	LogProblem  string `json:"log_problem,omitempty"`
-	TamperSince bool   `json:"tamper_detected_this_run"`
+	Version    string `json:"version"`
+	UptimeSec  int64  `json:"uptime_sec"`
+	Agents     int    `json:"agents"`
+	Rogue      int    `json:"rogue"`
+	Risky      int    `json:"risky"`
+	LogRecords int    `json:"log_records"`
+	LogIntact  bool   `json:"log_intact"`
+	LogProblem string `json:"log_problem,omitempty"`
+	// LogUnchecked: verification could not run (I/O error): not a tamper finding.
+	LogUnchecked bool `json:"log_unchecked,omitempty"`
+	TamperSince  bool `json:"tamper_detected_this_run"`
 }
 
 // Thermal describes thermal controls and state.
@@ -103,6 +108,7 @@ type Thermal struct {
 // Sinkhole describes the /etc/hosts telemetry sinkhole.
 type Sinkhole struct {
 	Active      bool     `json:"active"`
+	Damaged     bool     `json:"damaged,omitempty"`
 	Blocked     int      `json:"blocked"`
 	Expected    int      `json:"expected"`
 	Missing     []string `json:"missing,omitempty"`
@@ -125,13 +131,15 @@ type Response struct {
 	LAN      *LANPrivacy       `json:"lan_privacy,omitempty"`
 	Net      []netwatch.Entry  `json:"net,omitempty"`
 	Restore  []RestoreStep     `json:"restore,omitempty"`
+	Note     string            `json:"note,omitempty"` // a success with a caveat the user must see
 }
 
 // RestoreStep is one part of undoing DevShield's changes.
 type RestoreStep struct {
-	What   string `json:"what"`
-	OK     bool   `json:"ok"`
-	Detail string `json:"detail,omitempty"`
+	What   string   `json:"what"`
+	OK     bool     `json:"ok"`
+	Detail string   `json:"detail,omitempty"`
+	Notes  []string `json:"notes,omitempty"` // done, but with a caveat
 }
 
 // LANPrivacy is the local-network privacy state, and what a change did.

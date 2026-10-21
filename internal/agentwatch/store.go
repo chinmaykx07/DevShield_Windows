@@ -6,8 +6,12 @@
 //   unsanctioned — seen, never approved (default for anything new)
 //   sanctioned   — approved by the user; no alerts while unchanged
 //
-// A sanctioned agent whose executable hash changes drops back to
-// unsanctioned, so a replaced binary cannot inherit the approval.
+// A sanctioned agent whose hashed file (the script for runtimes, else the
+// executable) changes drops back to unsanctioned, so a replaced file can't
+// inherit the approval. A file that can't be hashed (unreadable, or over
+// 512 MB) can't be checked: the watcher then marks a sanctioned agent as
+// risky instead of trusting it. Only that one file is hashed: a runtime
+// (node, python) replaced underneath an approved script is not noticed.
 //
 // Functions take *sql.DB explicitly so they can be tested against a
 // throwaway database.

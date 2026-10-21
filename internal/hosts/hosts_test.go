@@ -146,7 +146,7 @@ func TestMissingEndMarkerRefusesToEdit(t *testing.T) {
 	if readHosts(t, root) != content {
 		t.Fatal("file changed although DevShield refused")
 	}
-	if st := Check(root, mustList(t)); !strings.Contains(strings.Join(st.Warnings, " "), "no end marker") {
+	if st := Check(root, mustList(t)); !st.Damaged || !strings.Contains(strings.Join(st.Warnings, " "), "no end marker") {
 		t.Errorf("status hides the problem: %v", st.Warnings)
 	}
 }

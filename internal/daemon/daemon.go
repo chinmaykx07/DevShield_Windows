@@ -21,12 +21,14 @@ package daemon
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/chinmaykx07/DevShield_Windows/internal/agentwatch"
@@ -90,17 +92,25 @@ type Daemon struct {
 	netRes  *netwatch.Resolver
 	netSeen *netwatch.Dedupe
 	stop    chan struct{}
+	closing atomic.Bool
 	started time.Time
 	tamper  bool
 
 	limMu   sync.Mutex
-	limited map[int]*window // uid → denied-event rate window
+	limited map[denyKey]*window // per uid and kind: denied-event rate window
 }
 
 type window struct {
 	start      time.Time
 	count      int
 	suppressed int
+}
+
+// denyKey separates tamper attempts from ordinary refused reads, so a
+// flood of harmless refusals can never hide a tamper attempt.
+type denyKey struct {
+	uid    int
+	tamper bool
 }
 
 // Denied/tamper events are rate-limited per uid so a hostile process
@@ -120,6 +130,8 @@ func Run(ctx context.Context, cfg Config) error {
 	if err != nil {
 		err = fmt.Errorf("listen on %s: %w", cfg.Socket, err)
 		d.event("DAEMON_START_FAILED", err.Error(), "fail")
+		d.closing.Store(true)
+		d.event("DAEMON_STOPPED", "stopped after a failed start", "fail")
 		d.shutdown()
 		return err
 	}
@@ -149,7 +161,7 @@ func start(cfg Config) (*Daemon, error) {
 		owners:  map[int]bool{},
 		logPath: filepath.Join(cfg.StateDir, "audit.log"),
 		started: time.Now(),
-		limited: map[int]*window{},
+		limited: map[denyKey]*window{},
 		stop:    make(chan struct{}),
 	}
 	for _, uid := range cfg.Owners {
@@ -169,7 +181,9 @@ func start(cfg Config) (*Daemon, error) {
 	if info.TornBytes > 0 {
 		d.event("AUDIT_TORN_RECORD_REMOVED", fmt.Sprintf("an unfinished final record (%d bytes, never confirmed) was removed — a crash or power loss cut a write short", info.TornBytes), "warn")
 	}
-	if info.Last != nil && info.Last.Action != "DAEMON_STOPPED" {
+	// After a break, the last valid record says nothing about how the
+	// previous run ended, so no guess is logged.
+	if info.Broken == nil && info.Last != nil && info.Last.Action != "DAEMON_STOPPED" {
 		d.event("DAEMON_UNCLEAN_STOP", "previous run ended without a clean stop (killed, crashed or power loss) after "+info.Last.Action, "warn")
 	}
 	if os.Geteuid() != 0 {
@@ -208,6 +222,8 @@ func start(cfg Config) (*Daemon, error) {
 }
 
 func (d *Daemon) close() {
+	d.flushAllSuppressed()
+	d.closing.Store(true) // later background events would make the next start report an unclean stop
 	d.event("DAEMON_STOPPED", "clean shutdown", "ok")
 	d.shutdown()
 }
@@ -225,41 +241,76 @@ func (d *Daemon) event(action, detail, status string) {
 }
 
 func (d *Daemon) eventFrom(action, detail, status, source string) {
+	if d.closing.Load() && action != "DAEMON_STOPPED" {
+		log.Printf("daemon: event after stop not recorded: %s %s", action, detail)
+		return
+	}
 	if _, err := d.log.Append(action, detail, status, source); err != nil {
 		log.Printf("daemon: audit append failed: %v", err)
 	}
 }
 
-// allowDeniedEvent applies the per-uid rate limit to denial events.
-func (d *Daemon) allowDeniedEvent(uid int) (bool, int) {
+// allowDeniedEvent applies the per-uid, per-kind rate limit. Refusals
+// beyond the limit are counted and summarised once when their minute ends
+// (IPC_DENIED_SUPPRESSED), whether or not anything else arrives.
+func (d *Daemon) allowDeniedEvent(k denyKey) bool {
 	d.limMu.Lock()
 	defer d.limMu.Unlock()
-	w := d.limited[uid]
+	w := d.limited[k]
 	now := time.Now()
 	if w == nil || now.Sub(w.start) > time.Minute {
-		suppressed := 0
-		if w != nil {
-			suppressed = w.suppressed
-		}
-		d.limited[uid] = &window{start: now, count: 1}
-		return true, suppressed
+		d.limited[k] = &window{start: now, count: 1}
+		return true
 	}
-	if w.count >= deniedPerMinute {
-		w.suppressed++
-		return false, 0
+	if w.count < deniedPerMinute {
+		w.count++
+		return true
 	}
-	w.count++
-	return true, 0
+	w.suppressed++
+	if w.suppressed == 1 {
+		time.AfterFunc(time.Minute-now.Sub(w.start), func() { d.flushSuppressed(k) })
+	}
+	return false
+}
+
+// flushSuppressed writes the summary for one window and closes it.
+func (d *Daemon) flushSuppressed(k denyKey) {
+	d.limMu.Lock()
+	w := d.limited[k]
+	n := 0
+	if w != nil {
+		n = w.suppressed
+		delete(d.limited, k)
+	}
+	d.limMu.Unlock()
+	if n == 0 {
+		return
+	}
+	kind := "refused reads"
+	if k.tamper {
+		kind = "policy-change attempts (AGENT_TAMPER_ATTEMPT)"
+	}
+	d.event("IPC_DENIED_SUPPRESSED", fmt.Sprintf("%d further %s from uid %d within a minute were refused but not logged one by one", n, kind, k.uid), "warn")
+}
+
+// flushAllSuppressed writes every pending summary (before a stop).
+func (d *Daemon) flushAllSuppressed() {
+	d.limMu.Lock()
+	var keys []denyKey
+	for k := range d.limited {
+		keys = append(keys, k)
+	}
+	d.limMu.Unlock()
+	for _, k := range keys {
+		d.flushSuppressed(k)
+	}
 }
 
 // handle answers one request from a kernel-identified peer.
 func (d *Daemon) handle(peer ipc.Peer, req ipc.Request) ipc.Response {
 	allowed, tamper := authorize(peer, req.Op, d.owners)
 	if !allowed {
-		if ok, suppressed := d.allowDeniedEvent(peer.UID); ok {
-			if suppressed > 0 {
-				d.event("IPC_DENIED_SUPPRESSED", fmt.Sprintf("%d further denials from uid %d were not logged", suppressed, peer.UID), "warn")
-			}
+		if d.allowDeniedEvent(denyKey{peer.UID, tamper}) {
 			if tamper {
 				d.event("AGENT_TAMPER_ATTEMPT", fmt.Sprintf("non-root process tried %q (id %q): %s", req.Op, req.ID, peer), "fail")
 			} else {
@@ -372,6 +423,11 @@ func anyBoost(c thermal.Caps) bool {
 
 func (d *Daemon) applyProfile(profile string, peer ipc.Peer) ipc.Response {
 	if profile == "off" {
+		if thermal.Active(d.thermalDir()) == "" {
+			if _, err := os.Stat(filepath.Join(d.thermalDir(), "thermal-baseline.json")); err != nil {
+				return ipc.Response{OK: true, Thermal: d.thermalStatus()} // nothing was changed: nothing to restore
+			}
+		}
 		failed, err := thermal.Off(d.thermalDir())
 		if err != nil {
 			d.event("THERMAL_RESTORE_FAILED", fmt.Sprintf("%v %v by %s", err, failed, peer), "fail")
@@ -415,6 +471,8 @@ func (d *Daemon) status() *ipc.Status {
 	st.LogRecords, st.LogIntact = n, err == nil
 	if err != nil {
 		st.LogProblem = err.Error()
+		var chainErr *auditlog.ChainError
+		st.LogUnchecked = !errors.As(err, &chainErr) // could not read it, not evidence of tampering
 	}
 	return st
 }
@@ -427,11 +485,24 @@ func (d *Daemon) agents() []ipc.Agent {
 			ID: a.ID, Name: a.Name, Vendor: a.Vendor, Kind: a.Kind,
 			Verdict: a.Verdict, Status: a.Status, PID: a.PID, Processes: a.Processes,
 			User: a.User, Exe: a.Exe, Reasons: a.Reasons, Risks: a.ActiveRisks,
-			Blocked: d.egress != nil && d.egress.IsBlocked(a.Fingerprint),
-			Allowed: d.egress != nil && d.egress.IsAllowed(a.Fingerprint),
+			Blocked:   d.egress != nil && d.egress.IsBlocked(a.Fingerprint),
+			NotYetCut: d.notYetCut(a),
+			Allowed:   d.egress != nil && d.egress.IsAllowed(a.Fingerprint),
 		})
 	}
 	return out
+}
+
+// notYetCut counts a blocked agent's processes still outside quarantine.
+func (d *Daemon) notYetCut(a agentwatch.RunningAgent) int {
+	if d.egress == nil || !d.egress.IsBlocked(a.Fingerprint) {
+		return 0
+	}
+	var pids []int
+	for _, p := range a.Procs {
+		pids = append(pids, int(p.PID))
+	}
+	return d.egress.NotQuarantined(pids)
 }
 
 // ParseOwners turns "alice,1000" into uids (names resolved via lookup).
@@ -482,7 +553,7 @@ func (d *Daemon) sinkholeStatus() ipc.Response {
 	}
 	st := hosts.Check(d.cfg.SysRoot, l)
 	out := &ipc.Sinkhole{
-		Active: st.Active, Blocked: st.Blocked, Expected: st.Expected, Missing: st.Missing,
+		Active: st.Active, Damaged: st.Damaged, Blocked: st.Blocked, Expected: st.Expected, Missing: st.Missing,
 		FilesInNSS: st.FilesInNSS, Warnings: st.Warnings, ListVersion: st.ListVersion,
 	}
 	for _, g := range l.Groups {

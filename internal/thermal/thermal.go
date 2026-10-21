@@ -9,8 +9,10 @@
 //	fan/power profile  /sys/firmware/acpi/platform_profile     (laptops)
 //
 // Safety model:
-//   - Baseline: before DevShield's FIRST change, the original value of every
-//     file it may ever touch is saved. Off() restores all of it exactly.
+//   - Baseline: before DevShield first writes a file, that file's original
+//     value is saved (files that only appear later, e.g. a CPU brought
+//     online, are added before their first write). Off() writes them back
+//     and reads each one back to confirm.
 //   - Atomic apply: if a required write fails, everything already written in
 //     that apply is put back, so the machine is never left half-changed.
 //   - Optional writes (EPP, platform profile) may be refused by the
@@ -270,7 +272,11 @@ func Apply(c Caps, profile, stateDir string) (Result, error) {
 }
 
 // Off restores every original value and forgets the baseline.
+// With no baseline (DevShield never changed anything) it does nothing.
 func Off(stateDir string) ([]string, error) {
+	if !exists(filepath.Join(stateDir, "thermal-baseline.json")) {
+		return nil, nil
+	}
 	b, err := loadBaseline(stateDir)
 	if err != nil {
 		return nil, err
@@ -314,12 +320,26 @@ func Active(stateDir string) string {
 
 func ensureBaseline(c Caps, stateDir string) error {
 	path := filepath.Join(stateDir, "thermal-baseline.json")
-	if exists(path) {
-		return nil // keep the ORIGINAL pre-DevShield state, never overwrite it
-	}
 	b := Baseline{Taken: time.Now().UTC().Format(time.RFC3339), Values: map[string]string{}}
+	if exists(path) {
+		old, err := loadBaseline(stateDir)
+		if err != nil {
+			return err
+		}
+		b = old
+	}
+	// Existing entries are the ORIGINAL pre-DevShield values: never
+	// overwritten. A file not in the baseline has never been written by
+	// DevShield, so its current value is its original one.
+	added := 0
 	for _, p := range c.candidatePaths() {
-		b.Values[p] = readString(p)
+		if _, ok := b.Values[p]; !ok {
+			b.Values[p] = readString(p)
+			added++
+		}
+	}
+	if added == 0 && exists(path) {
+		return nil
 	}
 	data, err := json.MarshalIndent(b, "", "  ")
 	if err != nil {

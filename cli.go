@@ -139,7 +139,7 @@ func runCLI(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		printSinkhole(resp.Sinkhole, stdout)
-		if len(resp.Sinkhole.Missing) > 0 || !resp.Sinkhole.FilesInNSS {
+		if len(resp.Sinkhole.Missing) > 0 || !resp.Sinkhole.FilesInNSS || resp.Sinkhole.Damaged {
 			return 3
 		}
 		return 0
@@ -154,7 +154,13 @@ func runCLI(args []string, stdout, stderr io.Writer) int {
 		if !ok {
 			return 1
 		}
+		if resp.Note != "" {
+			fmt.Fprintf(stdout, "⚠ done, but %s\n\n", resp.Note)
+		}
 		printEgress(resp.Egress, stdout)
+		if resp.Note != "" {
+			return 3
+		}
 		return 0
 	case "lockdown":
 		return cliLockdown(cargs, socket, stdout, stderr)
@@ -170,12 +176,23 @@ func runCLI(args []string, stdout, stderr io.Writer) int {
 				mark = "❌"
 			}
 			fmt.Fprintf(stdout, "%s %-45s %s\n", mark, s.What, s.Detail)
+			for _, n := range s.Notes {
+				fmt.Fprintf(stdout, "   ⚠ %s\n", n)
+			}
 		}
 		if !resp.OK {
 			fmt.Fprintf(stderr, "devshield: %s\n", resp.Error)
 			return 1
 		}
-		fmt.Fprintln(stdout, "\nThe system is back to how it was before DevShield changed it. Agent approvals and the audit log are kept.")
+		caveats := 0
+		for _, s := range resp.Restore {
+			caveats += len(s.Notes)
+		}
+		if caveats > 0 {
+			fmt.Fprintln(stdout, "\nEvery step ran, but read the ⚠ notes: not everything is back yet. Agent approvals and the audit log are kept.")
+			return 3
+		}
+		fmt.Fprintln(stdout, "\nEvery change DevShield recorded was undone (see the manual for what restore-all can't cover). Agent approvals and the audit log are kept.")
 		return 0
 	case "net":
 		return cliNet(cargs, socket, stdout, stderr)
@@ -262,9 +279,12 @@ func cliStatus(socket string, stdout, stderr io.Writer) int {
 	s := resp.Status
 	fmt.Fprintf(stdout, "DevShield daemon %s — up %s\n", s.Version, time.Duration(s.UptimeSec)*time.Second)
 	fmt.Fprintf(stdout, "AI agents running: %d  (rogue suspects: %d, risky: %d)\n", s.Agents, s.Rogue, s.Risky)
-	if s.LogIntact {
+	switch {
+	case s.LogIntact:
 		fmt.Fprintf(stdout, "Audit log: intact, %d records\n", s.LogRecords)
-	} else {
+	case s.LogUnchecked:
+		fmt.Fprintf(stdout, "Audit log: could not be checked — %s\n", s.LogProblem)
+	default:
 		fmt.Fprintf(stdout, "Audit log: TAMPERED — %s\n", s.LogProblem)
 	}
 	if s.TamperSince {
@@ -304,7 +324,10 @@ func cliAgents(args []string, socket string, stdout, stderr io.Writer) int {
 		if a.Exe != "" {
 			fmt.Fprintf(stdout, "          program: %s\n", a.Exe)
 		}
-		if a.Blocked {
+		switch {
+		case a.Blocked && a.NotYetCut > 0:
+			fmt.Fprintf(stdout, "          ⏳ blocked, but %d process(es) not cut off yet (caught at the next scan, within ~10 s)\n", a.NotYetCut)
+		case a.Blocked:
 			fmt.Fprintln(stdout, "          🔒 network blocked")
 		}
 		if a.Allowed {
@@ -462,7 +485,9 @@ func cliProfile(name, socket string, stdout, stderr io.Writer) int {
 }
 
 func printSinkhole(s *ipc.Sinkhole, stdout io.Writer) {
-	if s.Active {
+	if s.Damaged {
+		fmt.Fprintln(stdout, "Telemetry sinkhole: DAMAGED — DevShield's markers in /etc/hosts are broken, so it won't edit the file (see below)")
+	} else if s.Active {
 		fmt.Fprintf(stdout, "Telemetry sinkhole: ON — %d domains blocked in /etc/hosts (list %s)\n", s.Blocked, s.ListVersion)
 	} else {
 		fmt.Fprintf(stdout, "Telemetry sinkhole: off (list %s has %d domains)\n", s.ListVersion, s.Expected)
@@ -548,6 +573,11 @@ func printEgress(e *egress.Status, stdout io.Writer) {
 	if e == nil {
 		return
 	}
+	if e.Problem != "" {
+		fmt.Fprintf(stdout, "⚠ %s\n", e.Problem)
+		fmt.Fprintln(stdout, "Lockdown and blocked agents: UNKNOWN (the saved state could not be read)")
+		return
+	}
 	if l := e.Lockdown; l != nil {
 		fmt.Fprintln(stdout, "Lockdown: ON — nothing leaves except:")
 		for _, i := range l.Interfaces {
@@ -595,10 +625,7 @@ func printEgress(e *egress.Status, stdout io.Writer) {
 	if !e.CgroupV2 {
 		fmt.Fprintln(stdout, "  note: cgroup v2 is not mounted, so per-agent blocking is unavailable here")
 	}
-	if e.Problem != "" {
-		fmt.Fprintf(stdout, "  ⚠ %s\n", e.Problem)
-	}
-	if !e.RulesLoaded && e.Problem == "" {
+	if !e.RulesLoaded {
 		fmt.Fprintln(stdout, "  ⚠ the kernel does not have DevShield's firewall table loaded (the daemon re-applies it within 10 s)")
 	}
 }
@@ -674,11 +701,14 @@ func cliLANPrivacy(args []string, socket string, stdout, stderr io.Writer) int {
 			state(l.LLMNR, l.LLMNR == "on"), l.LLMNR, state(l.MDNS, l.MDNS == "on"), l.MDNS,
 			state(l.IPv6Privacy, l.IPv6Privacy == "off"), l.IPv6Privacy)
 		for _, w := range l.WiFi {
-			state := "random address in use"
-			if w.Hardware {
+			icon, state := mark(w.Hardware), "random address in use"
+			switch {
+			case !w.Known:
+				icon, state = "❔", "address type unknown"
+			case w.Hardware:
 				state = "HARDWARE address — trackable across networks"
 			}
-			fmt.Fprintf(stdout, "%s Wi-Fi %s: %s (%s)\n", mark(w.Hardware), w.Name, w.MAC, state)
+			fmt.Fprintf(stdout, "%s Wi-Fi %s: %s (%s)\n", icon, w.Name, w.MAC, state)
 		}
 		for _, w := range l.Warnings {
 			fmt.Fprintf(stdout, "  ⚠ %s\n", w)
@@ -738,9 +768,9 @@ func cliNet(args []string, socket string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "%s %-7s %-20s %7d  %-24s %4d  %s\n", netIcon[e.Category], e.Category, truncate(e.Program, 20), e.PID, e.Remote, e.Count, e.Host)
 	}
 	if shown == 0 {
-		fmt.Fprintln(stdout, "No outbound connections right now.")
+		fmt.Fprintln(stdout, "No established outbound TCP connections in the last scan.")
 	}
-	fmt.Fprintln(stdout, "\nLabels come from IP addresses (shared CDNs can mislead). Updated every 10 s.")
+	fmt.Fprintln(stdout, "\nTCP only (UDP/QUIC traffic is not shown). Labels come from IP addresses (shared CDNs can mislead). Updated every 10 s.")
 	if telemetry > 0 {
 		return 3
 	}

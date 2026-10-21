@@ -1,7 +1,9 @@
 // Package hosts manages DevShield's telemetry sinkhole in /etc/hosts.
 //
-// Only a clearly marked block is ever touched; the user's own entries are
-// preserved byte for byte. Applying always rewrites the WHOLE managed
+// Only a clearly marked block is ever touched. The user's lines outside it
+// are kept unchanged (trailing blank lines are normalised to one newline);
+// a host entry the user added inside the block is moved out and kept, but
+// comments and blank lines inside the block are DevShield's and dropped. Applying always rewrites the WHOLE managed
 // block from the current list (the Windows script's bug of replacing the
 // block with only newly added domains cannot happen here). Off() removes
 // just the block, so edits the user made in the meantime are kept.
@@ -209,6 +211,7 @@ func Off(root string) (bool, error) {
 // Status is what the sinkhole looks like right now, read from disk.
 type Status struct {
 	Active      bool     `json:"active"`
+	Damaged     bool     `json:"damaged,omitempty"` // markers broken: state unknown, file not edited
 	Blocked     int      `json:"blocked"`           // domains in the managed block
 	Expected    int      `json:"expected"`          // domains the current list wants
 	Missing     []string `json:"missing,omitempty"` // in the list, not in the file
@@ -227,6 +230,9 @@ func Check(root string, l List) Status {
 	}
 	_, managed, present, err := splitManaged(string(data))
 	if err != nil {
+		// Markers present but broken: the blocking lines may well be in
+		// force, so this is not "off".
+		st.Damaged = true
 		st.Warnings = append(st.Warnings, err.Error())
 	}
 	st.Active, st.Blocked = present, len(managed)

@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
 	"os/user"
 	"strconv"
@@ -35,18 +36,26 @@ func (d *Daemon) startEgress() {
 	go func() {
 		t := time.NewTicker(egressInterval)
 		defer t.Stop()
+		unverifiable := false
 		for {
 			select {
 			case <-d.stop:
 				return
 			case <-t.C:
 				d.reconcileEgress()
-				if again, err := m.EnsureLoaded(); again {
-					if err != nil {
-						d.event("EGRESS_RULES_MISSING", "DevShield's firewall rules were removed or altered and could not be restored: "+err.Error(), "fail")
-					} else {
-						d.event("EGRESS_RULES_RESTORED", "DevShield's firewall rules had been removed or altered by something else; restored", "warn")
+				again, err := m.EnsureLoaded()
+				switch {
+				case !again:
+					unverifiable = false
+				case errors.Is(err, egress.ErrUnverifiable):
+					if !unverifiable { // say it once, not every 10 s
+						d.event("EGRESS_RULES_UNVERIFIABLE", err.Error(), "warn")
+						unverifiable = true
 					}
+				case err != nil:
+					d.event("EGRESS_RULES_MISSING", "DevShield's firewall rules did not match what it loaded and could not be re-applied: "+err.Error(), "fail")
+				default:
+					d.event("EGRESS_RULES_RESTORED", "DevShield's firewall rules did not match what it loaded (removed or changed by another program or by hand) and were re-applied", "warn")
 				}
 			}
 		}
@@ -73,9 +82,16 @@ func (d *Daemon) reconcileEgress() {
 		if why == "" {
 			continue
 		}
-		if err := d.egress.Disallow(fp); err == nil {
-			d.event("AGENT_ALLOW_SUSPENDED", fmt.Sprintf("network allowance of %s withdrawn: %s", agentwatch.ShortID(fp), why), "warn")
+		note, err := d.egress.Disallow(fp)
+		if err != nil {
+			d.event("EGRESS_FAILED", fmt.Sprintf("could not withdraw the network allowance of %s (%s): %v — it may still go out during a lockdown", agentwatch.ShortID(fp), why, err), "fail")
+			continue
 		}
+		detail := fmt.Sprintf("network allowance of %s withdrawn: %s", agentwatch.ShortID(fp), why)
+		if note != "" {
+			detail += " (" + note + ")"
+		}
+		d.event("AGENT_ALLOW_SUSPENDED", detail, "warn")
 	}
 	for _, id := range d.egress.Reconcile(running) {
 		d.event("AGENT_REQUARANTINED", "blocked agent "+id+" came back (restarted or new process) and was cut off again", "warn")
@@ -101,11 +117,14 @@ func (d *Daemon) setAllow(op, id string, peer ipc.Peer) ipc.Response {
 		if !ok {
 			return ipc.Response{Error: fmt.Sprintf("no allowed agent matches %q (see: devshield egress)", id)}
 		}
-		if err := d.egress.Disallow(fp); err != nil {
+		note, err := d.egress.Disallow(fp)
+		if err != nil {
 			return ipc.Response{Error: err.Error()}
 		}
-		d.event("AGENT_DISALLOWED", fmt.Sprintf("%s may no longer go out during lockdown (by %s)", id, peer), "ok")
-		return d.egressStatus()
+		d.event("AGENT_DISALLOWED", withNote(fmt.Sprintf("%s may no longer go out during lockdown (by %s)", id, peer), note), "ok")
+		resp := d.egressStatus()
+		resp.Note = note
+		return resp
 	}
 	fp, name, short, err := d.watcher.ResolveKnown(id)
 	if err != nil {
@@ -150,16 +169,19 @@ func (d *Daemon) setBlock(op, id string, peer ipc.Peer) ipc.Response {
 		if !ok {
 			return ipc.Response{Error: fmt.Sprintf("no blocked agent matches %q (see: devshield egress)", id)}
 		}
-		if err := d.egress.Unblock(fp); err != nil {
+		note, err := d.egress.Unblock(fp)
+		if err != nil {
 			d.event("EGRESS_FAILED", fmt.Sprintf("unblock %s: %v (by %s)", id, err, peer), "fail")
 			return ipc.Response{Error: err.Error()}
 		}
-		d.event("AGENT_UNBLOCKED", fmt.Sprintf("%s may use the network again (by %s)", id, peer), "ok")
-		return d.egressStatus()
+		d.event("AGENT_UNBLOCKED", withNote(fmt.Sprintf("%s may use the network again (by %s)", id, peer), note), "ok")
+		resp := d.egressStatus()
+		resp.Note = note
+		return resp
 	}
 
 	// Agents seen before but not running now can be blocked too: they are
-	// cut off the moment they reappear.
+	// cut off at the next scan after they reappear (within about 10 s).
 	fp, name, short, err := d.watcher.ResolveKnown(id)
 	if err != nil {
 		return ipc.Response{Error: err.Error()}
@@ -215,6 +237,13 @@ func (d *Daemon) setLockdown(mode string, req *ipc.LockdownRequest, peer ipc.Pee
 	}
 	d.event("LOCKDOWN_"+strings.ToUpper(mode), strings.TrimPrefix(detail+" (by "+peer.String()+")", " "), "ok")
 	return d.egressStatus()
+}
+
+func withNote(s, note string) string {
+	if note == "" {
+		return s
+	}
+	return s + " — but " + note
 }
 
 // lockdownFrom resolves user names (as root, so the answer is the

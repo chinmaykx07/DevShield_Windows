@@ -104,8 +104,10 @@ func TestSilentThenGamingThenOffRestoresOriginal(t *testing.T) {
 	if Active(state) != "" {
 		t.Error("active profile not cleared")
 	}
-	if _, err := Off(state); err == nil {
-		t.Error("second Off should say there is nothing to restore")
+	// Nothing left to restore is not a failure: a second Off succeeds and
+	// changes nothing.
+	if failed, err := Off(state); err != nil || len(failed) != 0 {
+		t.Errorf("second Off: %v %v", failed, err)
 	}
 }
 
@@ -190,5 +192,32 @@ func TestUnsupportedMachineAndUnknownProfile(t *testing.T) {
 	}
 	if _, _, err := Detect(intelMachine(t)).Plan("turbo-max"); err == nil {
 		t.Fatal("expected an error for an unknown profile")
+	}
+}
+
+// A setting that appears after the first apply (e.g. a CPU brought online)
+// must be restored too (found in the 2026-10-21 message review).
+func TestLateAppearingSettingIsRestored(t *testing.T) {
+	root, state := intelMachine(t), t.TempDir()
+	if _, err := Apply(Detect(root), "silent", state); err != nil {
+		t.Fatal(err)
+	}
+	d := cpu + "/cpufreq/policy4/"
+	writeTree(t, root, map[string]string{
+		d + "cpuinfo_min_freq": "400000", d + "cpuinfo_max_freq": "4800000", d + "scaling_max_freq": "4800000",
+		d + "energy_performance_preference":            "balance_performance",
+		d + "energy_performance_available_preferences": "default performance balance_performance balance_power power",
+	})
+	if _, err := Apply(Detect(root), "silent", state); err != nil {
+		t.Fatal(err)
+	}
+	if read(t, root, d+"scaling_max_freq") == "4800000" {
+		t.Fatal("test setup: the new policy was not changed")
+	}
+	if failed, err := Off(state); err != nil {
+		t.Fatal(failed, err)
+	}
+	if got := read(t, root, d+"scaling_max_freq"); got != "4800000" {
+		t.Fatalf("late policy not restored: %s", got)
 	}
 }

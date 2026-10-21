@@ -12,9 +12,9 @@
 //   - A stable IPv6 address built from the MAC tracks the device across the
 //     internet. → IPv6 privacy (temporary) addresses are preferred.
 //
-// DevShield only creates and deletes its OWN drop-in files; it never edits
-// a system or user configuration file, so "off" restores exactly what was
-// there. Status reports the effective state read back from the system,
+// DevShield only creates and deletes its OWN drop-in files and never edits
+// a system or user configuration file; "off" removes those files and writes
+// back the live values it recorded (directories it created are left, empty). Status reports the effective state read back from the system,
 // not what was written.
 //
 // Root is a filesystem prefix ("" = real system) for testing.
@@ -147,8 +147,8 @@ type Result struct {
 func (s System) Apply() (Result, error) {
 	var r Result
 	// Every file is written first, all or nothing: a failure part-way
-	// puts back exactly what was there, so the machine is never left
-	// half-configured (found in review).
+	// puts back what was there (and says so if even that fails), so the
+	// machine is not left half-configured (found in review).
 	type file struct{ path, content string }
 	var files []file
 	if s.hasResolved() {
@@ -180,25 +180,32 @@ func (s System) Apply() (Result, error) {
 		existed bool
 	}
 	var done []before
-	undo := func() {
+	undo := func() string {
+		var stuck []string
 		for _, b := range done {
+			var err error
 			if b.existed {
-				os.WriteFile(s.path(b.path), b.content, 0o644)
+				err = os.WriteFile(s.path(b.path), b.content, 0o644)
 			} else {
-				os.Remove(s.path(b.path))
+				err = os.Remove(s.path(b.path))
+			}
+			if err != nil {
+				stuck = append(stuck, b.path)
 			}
 		}
+		if len(stuck) > 0 {
+			return "these files could NOT be put back: " + strings.Join(stuck, ", ") + " — run 'sudo devshield lan-privacy off'"
+		}
+		return "nothing was changed"
 	}
 	for _, f := range files {
 		old, err := os.ReadFile(s.path(f.path))
 		b := before{path: f.path, content: old, existed: err == nil}
 		if err := os.MkdirAll(filepath.Dir(s.path(f.path)), 0o755); err != nil {
-			undo()
-			return Result{}, fmt.Errorf("%s: %w (nothing was changed)", f.path, err)
+			return Result{}, fmt.Errorf("%s: %w (%s)", f.path, err, undo())
 		}
 		if err := os.WriteFile(s.path(f.path), []byte(f.content), 0o644); err != nil {
-			undo()
-			return Result{}, fmt.Errorf("%s: %w (nothing was changed)", f.path, err)
+			return Result{}, fmt.Errorf("%s: %w (%s)", f.path, err, undo())
 		}
 		done = append(done, b)
 	}
@@ -251,13 +258,17 @@ func (s System) Off() (Result, error) {
 			restored++
 		}
 	}
+	sysctlWhat := "IPv6 privacy setting removed and original value restored"
 	if len(originals) > 0 && restored < len(originals) {
-		r.Notes = append(r.Notes, "IPv6 privacy setting could not be reset live; the original returns at reboot")
+		sysctlWhat = "IPv6 privacy setting removed"
+		r.Notes = append(r.Notes, "the live IPv6 privacy value could not be reset; the original returns at reboot")
+	} else if len(originals) == 0 {
+		sysctlWhat = "IPv6 privacy setting removed (no original value was recorded; the system default returns at reboot)"
 	}
 	for _, f := range []struct{ path, what, cmd string }{
 		{ResolvedDropIn, "systemd-resolved settings removed", "resolved"},
 		{NMDropIn, "NetworkManager settings removed", "nm"},
-		{SysctlDropIn, "IPv6 privacy setting removed and original value restored", ""},
+		{SysctlDropIn, sysctlWhat, ""},
 	} {
 		err := os.Remove(s.path(f.path))
 		if os.IsNotExist(err) {
@@ -269,9 +280,13 @@ func (s System) Off() (Result, error) {
 		r.Changed = append(r.Changed, f.what)
 		switch f.cmd {
 		case "resolved":
-			s.Run("systemctl", "try-reload-or-restart", "systemd-resolved")
+			if out, err := s.Run("systemctl", "try-reload-or-restart", "systemd-resolved"); err != nil {
+				r.Notes = append(r.Notes, "systemd-resolved did not reload ("+why(out, err)+"); its LLMNR/mDNS settings stay in effect until it restarts or the machine reboots")
+			}
 		case "nm":
-			s.Run("nmcli", "general", "reload", "conf")
+			if out, err := s.Run("nmcli", "general", "reload", "conf"); err != nil {
+				r.Notes = append(r.Notes, "NetworkManager did not reload ("+why(out, err)+"); its settings stay in effect until it restarts or the machine reboots")
+			}
 		}
 	}
 	return r, nil
@@ -282,6 +297,7 @@ type Iface struct {
 	Name     string `json:"name"`
 	MAC      string `json:"mac"`
 	Hardware bool   `json:"hardware_address"` // the burned-in address is in use
+	Known    bool   `json:"known"`            // false: the address type could not be read
 }
 
 // Status is the effective LAN-privacy state.
@@ -332,9 +348,10 @@ func (s System) Check() Status {
 			continue
 		}
 		mac, _ := os.ReadFile(s.path(dir + "/address"))
-		typ, _ := os.ReadFile(s.path(dir + "/addr_assign_type"))
+		typ, terr := os.ReadFile(s.path(dir + "/addr_assign_type"))
 		// 0 = permanent (burned-in); 1 random, 3 set by software.
-		st.WiFi = append(st.WiFi, Iface{Name: e.Name(), MAC: strings.TrimSpace(string(mac)), Hardware: strings.TrimSpace(string(typ)) == "0"})
+		st.WiFi = append(st.WiFi, Iface{Name: e.Name(), MAC: strings.TrimSpace(string(mac)),
+			Hardware: terr == nil && strings.TrimSpace(string(typ)) == "0", Known: terr == nil})
 	}
 
 	for name, warn := range map[string]string{

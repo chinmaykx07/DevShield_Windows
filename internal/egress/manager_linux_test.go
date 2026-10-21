@@ -316,7 +316,7 @@ func TestDisallowRemovesOrphans(t *testing.T) {
 	m := &Manager{cfg: Config{ProcRoot: proc, Nft: nft.run, NftList: nft.list, StateDir: t.TempDir(),
 		Emit: func(a, d, s string) { events = append(events, a) }}, cgRoot: cg, nftBase: cg,
 		st: state{Blocked: map[string]*Member{}, Allowed: map[string]*Member{"fp": {ID: "x", Origins: map[int]string{100: "/a"}}}}}
-	if err := m.Disallow("fp"); err != nil {
+	if _, err := m.Disallow("fp"); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := os.ReadFile(filepath.Join(cg, "a", "cgroup.procs")); string(got) != "100" {
@@ -367,5 +367,22 @@ func TestResetUndoesEverything(t *testing.T) {
 	did, err := m.Reset()
 	if err != nil || len(did) != 1 || strings.Contains(nft.last(), "chain egress") || !m.Status().ConfirmBy.IsZero() {
 		t.Fatalf("reset: %v %v\n%s", did, err, nft.last())
+	}
+}
+
+// If nft lists rules in a form DevShield can't compare, that must be said
+// (once) instead of blaming another program every 10 s.
+func TestIncomparableListingIsUnverifiable(t *testing.T) {
+	nft := &fakeNft{}
+	m, err := New(Config{StateDir: t.TempDir(), ProcRoot: t.TempDir(), Nft: nft.run,
+		NftList: func() (string, error) {
+			return "table inet devshield {\n\tchain egress {\n\t\tsomething else\n\t}\n}\n", nil
+		}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.LockdownOn(wg0, 0)
+	if again, err := m.EnsureLoaded(); !again || !errors.Is(err, ErrUnverifiable) {
+		t.Fatalf("EnsureLoaded = %v, %v", again, err)
 	}
 }

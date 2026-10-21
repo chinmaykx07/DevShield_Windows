@@ -150,8 +150,9 @@ func (t *spawnTracker) recent(pid int32) []string {
 }
 
 // llmEnvValues returns the LLM-related variables in env as
-// name → short hash of the value. Values are hashed immediately so that
-// secrets are never kept in memory or written anywhere. A pattern ending
+// name → short hash of the value. Only the hash is kept (in memory, for
+// the process's lifetime) and nothing is written anywhere; the full
+// environment is read into memory briefly to compute it. A pattern ending
 // in "*" is a prefix.
 func llmEnvValues(env []string, patterns []string) map[string]string {
 	out := map[string]string{}

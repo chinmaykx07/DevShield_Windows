@@ -7,6 +7,9 @@ import (
 	"time"
 )
 
+// ErrUnverifiable: rules loaded but not comparable (see the Linux manager).
+var ErrUnverifiable = errors.New("rules can't be verified on this system")
+
 var errUnsupported = errors.New("network controls are only implemented on Linux so far")
 
 // Config for a Manager.
@@ -52,12 +55,13 @@ type Manager struct{}
 
 func New(Config) (*Manager, error)                                      { return nil, errUnsupported }
 func (*Manager) Block(string, string, string, []Proc) (int, int, error) { return 0, 0, errUnsupported }
-func (*Manager) Unblock(string) error                                   { return errUnsupported }
+func (*Manager) Unblock(string) (string, error)                         { return "", errUnsupported }
 func (*Manager) Reconcile(map[string][]Proc) []string                   { return nil }
 func (*Manager) IsBlocked(string) bool                                  { return false }
 func (*Manager) ResolveBlocked(string) (string, bool)                   { return "", false }
 func (*Manager) Allow(string, string, string, []Proc) (int, error)      { return 0, errUnsupported }
-func (*Manager) Disallow(string) error                                  { return errUnsupported }
+func (*Manager) Disallow(string) (string, error)                        { return "", errUnsupported }
+func (*Manager) NotQuarantined([]int) int                               { return 0 }
 func (*Manager) IsAllowed(string) bool                                  { return false }
 func (*Manager) AllowedFingerprints() []string                          { return nil }
 func (*Manager) ResolveAllowed(string) (string, bool)                   { return "", false }

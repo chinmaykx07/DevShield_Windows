@@ -228,3 +228,38 @@ func TestThermalProfileThroughDaemon(t *testing.T) {
 		t.Fatalf("thermal state dir mode %v", fi.Mode().Perm())
 	}
 }
+
+// Found in review: refused reads shared one budget with tamper attempts
+// (10 harmless refusals hid the next tamper attempt), and the summary of
+// suppressed denials was only written if another denial came later.
+func TestDenialLoggingCannotBeDrowned(t *testing.T) {
+	d, err := start(Config{StateDir: filepath.Join(t.TempDir(), "state"), Version: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	peer := ipc.Peer{UID: 4242, PID: 1, Exe: "/tmp/rogue"}
+	for i := 0; i < 15; i++ {
+		d.handle(peer, ipc.Request{Op: "status"}) // not an owner: refused read
+	}
+	d.handle(peer, ipc.Request{Op: "sanction", ID: "abcd1234"})
+	for i := 0; i < 12; i++ {
+		d.handle(peer, ipc.Request{Op: "revoke", ID: "abcd1234"})
+	}
+	d.close() // attempts stop: the pending summaries must still be written
+	recs, _ := auditlog.Tail(d.logPath, 200)
+	var tamper, summaries int
+	for _, r := range recs {
+		switch r.Action {
+		case "AGENT_TAMPER_ATTEMPT":
+			tamper++
+		case "IPC_DENIED_SUPPRESSED":
+			summaries++
+		}
+	}
+	if tamper != deniedPerMinute {
+		t.Errorf("tamper attempts logged = %d, want %d (refused reads must not use up their budget)", tamper, deniedPerMinute)
+	}
+	if summaries != 2 {
+		t.Errorf("summaries = %d, want 2 (one per kind)", summaries)
+	}
+}

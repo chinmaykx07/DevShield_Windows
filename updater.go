@@ -229,6 +229,9 @@ func IsUpdateAvailable() string {
 func OpenReleasePage() {
 	url := fmt.Sprintf("https://github.com/%s/%s/releases/latest", repoOwner, repoName)
 	cmd := exec.Command("cmd", "/c", "start", url)
-	_ = cmd.Start()
+	if err := cmd.Start(); err != nil {
+		WriteGoEvent("UPDATE_PAGE_FAILED", fmt.Sprintf("%s: %v", url, err), "fail")
+		return
+	}
 	WriteGoEvent("UPDATE_PAGE_OPENED", url, "ok")
 }

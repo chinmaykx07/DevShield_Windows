@@ -250,11 +250,17 @@ func (w *Watcher) scan() {
 		change := SightingSeenBefore
 
 		if db != nil {
-			ch, status, err := recordSighting(db, a.Detection, w.hashFile(hashTarget(a)), now)
+			hash := w.hashFile(hashTarget(a))
+			ch, status, err := recordSighting(db, a.Detection, hash, now)
 			if err != nil {
 				log.Printf("agentwatch: record %s: %v", a.Name, err)
 			} else {
 				change, a.Status = ch, status
+			}
+			if hash == "" && a.Status == AgentSanctioned {
+				// The approval can't be checked against the file: say so
+				// rather than let a replacement keep it unnoticed.
+				a.Risks = append(a.Risks, "its program file can't be hashed (unreadable, or over 512 MB), so a replaced file would go unnoticed")
 			}
 		}
 		a.Verdict, a.ActiveRisks = AgentVerdict(a.Status, a.Risks)
