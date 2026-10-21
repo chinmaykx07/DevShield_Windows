@@ -111,6 +111,12 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   35 to 0. CI now runs vet, race tests and govulncheck on Linux and Windows.
 
 ### Fixed
+- Agent Watch kept a process's old identity after it ran a new program
+  (exec keeps the PID and start time, which keyed its cache): a launcher
+  that execs an agent, or a rogue that starts as something innocent and
+  execs itself just after a scan, kept the old name and command line for
+  its whole life. Found by the live suite (a scan landed just before the
+  test agent's own exec). Linux scans now notice the change and re-read.
 - Second code audit (13 bugs, each with a regression test): a second
   daemon could break the audit chain and take the socket (now one per
   state directory); stopping could withdraw an allowance silently (a

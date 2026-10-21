@@ -1,6 +1,9 @@
 package agentwatch
 
 import (
+	"os/exec"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -64,5 +67,45 @@ func TestExecEventCountsShortCommandOnce(t *testing.T) {
 	tr.recordExec(id, now, isTool, isShell, nil)
 	if got := tr.recent(100); len(got) != 2 {
 		t.Fatalf("late exec event counted again: %v", got)
+	}
+}
+
+// A process that runs a new program (exec) keeps its PID and start time.
+// The scan must see the new program, not keep the old identity: launchers
+// exec agents, and a rogue could start as something innocent and exec
+// itself just after a scan.
+func TestScanSeesProgramReplacedByExec(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("no exec-in-place on Windows")
+	}
+	cmd := exec.Command("/bin/sh", "-c", "sleep 0.4; exec /bin/sleep 30")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cmd.Process.Kill(); cmd.Wait() })
+	pid := int32(cmd.Process.Pid)
+	w, err := New(Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	find := func() ProcInfo {
+		snap, err := w.collect(w.Catalog())
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, p := range snap.Procs {
+			if p.PID == pid {
+				return p
+			}
+		}
+		t.Fatalf("pid %d not in scan", pid)
+		return ProcInfo{}
+	}
+	if p := find(); !strings.Contains(p.Cmdline, "sh -c") {
+		t.Fatalf("before exec: %+v", p)
+	}
+	time.Sleep(time.Second)
+	if p := find(); p.Name != "sleep" || p.Cmdline != "/bin/sleep 30" {
+		t.Fatalf("after exec the scan still reports the old program: %+v", p)
 	}
 }

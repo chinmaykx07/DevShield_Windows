@@ -14,6 +14,7 @@ import (
 	"strings"
 	"unsafe"
 
+	"github.com/shirou/gopsutil/v3/process"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 )
@@ -130,3 +131,7 @@ func (w *Watcher) startExecEvents() error {
 }
 
 func readFastProc(int32) (fastProc, bool) { return fastProc{}, false }
+
+// execChanged: Windows has no exec-in-place; a new program is a new
+// process (new PID or start time), which the cache already handles.
+func execChanged(*process.Process, ProcInfo) bool { return false }

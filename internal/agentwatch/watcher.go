@@ -515,8 +515,12 @@ func (w *Watcher) collect(cat *AgentCatalog) (Snapshot, error) {
 
 		// Cmdline/exe/user/env lookups are expensive on Windows — do them
 		// once per process lifetime (PID + create time).
+		// A process that ran a new program (exec) keeps its PID and start
+		// time; a cache keyed by those alone kept the old program's
+		// identity for good (a launcher that execs the agent, or a rogue
+		// that starts as something innocent and execs itself).
 		c, ok := w.procCache[p.Pid]
-		if !ok || c.createTime != ct {
+		if !ok || c.createTime != ct || execChanged(p, c.info) {
 			c = cachedProc{createTime: ct, info: procInfoOf(p)}
 			if env, err := p.Environ(); err == nil {
 				c.envLLM = llmEnvValues(env, cat.LLMEnvVars)

@@ -20,6 +20,7 @@ import (
 	"sync"
 
 	"github.com/chinmaykx07/DevShield_Windows/internal/procevents"
+	"github.com/shirou/gopsutil/v3/process"
 )
 
 // procNameCache: PID → (ppid, name) for PIDs already read. Shared by
@@ -269,3 +270,12 @@ func (w *Watcher) startExecEvents() error {
 
 // readFastProc reads one process's name, parent and terminal.
 func readFastProc(pid int32) (fastProc, bool) { return readProcStat(pid) }
+
+// execChanged reports whether the process has run a new program since
+// cached was read: its executable or command line differ. Two small reads
+// per process and scan.
+func execChanged(p *process.Process, cached ProcInfo) bool {
+	exe, _ := p.Exe()
+	cmd, _ := p.Cmdline()
+	return exe != cached.Exe || cmd != cached.Cmdline
+}

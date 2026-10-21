@@ -40,3 +40,11 @@ func (w *Watcher) startExecEvents() error {
 }
 
 func readFastProc(int32) (fastProc, bool) { return fastProc{}, false }
+
+// execChanged reports whether the process has run a new program since
+// cached was read.
+func execChanged(p *process.Process, cached ProcInfo) bool {
+	exe, _ := p.Exe()
+	cmd, _ := p.Cmdline()
+	return exe != cached.Exe || cmd != cached.Cmdline
+}
