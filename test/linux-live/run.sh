@@ -127,6 +127,14 @@ check "detected exe is python" "$(agentjson exe | grep -c python)" 1
 check "agent + its child only (helper and harness not matched)" "$(agentjson processes)" 2
 if [ "$(agentjson processes)" != 2 ]; then echo "  ABORT: wrong processes detected; later checks would be meaningless"; exit 1; fi
 
+echo "-- behaviour alone: an uncatalogued program serving on a model port"
+$FX listener & LS=$!
+unknown() { $DS agents --json | python3 -c "import json,sys;a=[a for a in json.load(sys.stdin) if a['name'].startswith('Unknown AI agent')];print(a[0]['$1'] if a else '')"; }
+check "detected with no catalog entry" "$(waitfor 30 sh -c "$DS agents | grep -q 'Unknown AI agent'" && echo yes)" yes
+check "its verdict is rogue (undocumented)" "$(unknown verdict)" rogue
+check "the reason given is the model port" "$(unknown reasons | grep -c 11434)" 1
+kill $LS; wait $LS 2>/dev/null
+
 echo "-- block"
 $DS block "$ID" >/dev/null
 check "held connection cut" "$(stopped 9000)" stopped
@@ -246,7 +254,7 @@ trap - EXIT
 check "no DevShield cgroups left" "$(ls -d "$CG"/devshield-* 2>/dev/null | wc -l | tr -d ' ')" 0
 check "no DevShield table left" "$(nft list table inet devshield >/dev/null 2>&1 && echo yes || echo no)" no
 echo "-- restore-all"
-"$HERE/restore_all.sh" "$BIN" "$D" || fails=$((fails + 1))
+"$HERE/restore_all.sh" "$BIN" "$D" "$CG" || fails=$((fails + 1))
 echo "-- network monitor"
 "$HERE/netwatch.sh" "$BIN" "$D" || fails=$((fails + 1))
 

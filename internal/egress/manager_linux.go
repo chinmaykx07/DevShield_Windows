@@ -859,7 +859,11 @@ func (m *Manager) Reset() ([]string, error) {
 			if os.Remove(m.groupDir(g)) == nil {
 				did = append(did, "removed leftover group "+g)
 			} else {
-				stuck = append(stuck, fmt.Sprintf("%s still holds %d process(es)", g, len(m.members(g))))
+				what := "its rule stays loaded, so they stay cut off (fail closed)"
+				if g == AllowedCgroup {
+					what = "with no lockdown it grants nothing"
+				}
+				stuck = append(stuck, fmt.Sprintf("%s still holds %d process(es); %s", g, len(m.members(g)), what))
 			}
 		}
 	}
@@ -880,7 +884,7 @@ func (m *Manager) Reset() ([]string, error) {
 		return did, err
 	}
 	if len(stuck) > 0 {
-		return did, fmt.Errorf("%s; their rule stays loaded (fail closed) — end or move those processes and run again", strings.Join(stuck, "; "))
+		return did, fmt.Errorf("%s — end or move those processes and run again", strings.Join(stuck, "; "))
 	}
 	return did, nil
 }

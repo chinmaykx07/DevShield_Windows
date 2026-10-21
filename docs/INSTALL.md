@@ -90,14 +90,16 @@ At the end, it offers to launch DevShield immediately. You can uncheck this and 
 
 ## 6. What happens on first run
 
-The first time `devshield.exe` runs, it automatically:
+> **Not what happens today.** This describes the intended first run. Currently the tray never starts `01_first_run.ps1`, task registration always fails, and first run stops at an interactive prompt (C1, C2 in `REVIEW_NOTES_2026-10-20.md`). Nothing here has been run on a real Windows machine.
+
+The first time `devshield.exe` runs, it is designed to:
 
 1. Shows the tray icon within a few seconds
 2. Triggers `01_first_run.ps1`, which:
    - Scans your hardware
    - Saves the result to `%USERPROFILE%\.devshield\hardware_profile.json`
    - Shows exactly one UAC prompt to register Task Scheduler tasks
-   - Registers six Task Scheduler tasks under a `DevShield` folder
+   - Registers eight Task Scheduler tasks under a `DevShield` folder
    - Offers to download LibreHardwareMonitor
 3. Creates the DevShield home folder at `%USERPROFILE%\.devshield\` containing `config.json`, `state.json`, and an empty `audit.db`
 
@@ -126,10 +128,11 @@ If any of these fail, see [TROUBLESHOOTING.md](TROUBLESHOOTING.md) → "First ru
 ## 8. Uninstalling
 
 1. Settings → Apps → DevShield → Uninstall (or via the Start Menu shortcut)
-2. The uninstaller will ask whether to remove your DevShield data folder (`~/.devshield/`) — this contains your hardware profile, audit logs, and backup files used by rollback
-3. After uninstalling, verify the Task Scheduler tasks are gone:
+2. The uninstaller is meant to ask whether to remove your DevShield data folder (`%USERPROFILE%\.devshield\`) — this contains your hardware profile, audit logs, and backup files used by rollback
+3. **The uninstaller currently leaves things behind:** the `\DevShield\` scheduled tasks, the hosts-file block, the firewall rules and a running LibreHardwareMonitor. It also looks for the data folder in the wrong place (`AppData\Roaming`), so `%USERPROFILE%\.devshield` stays. Before uninstalling, undo DevShield's changes (see the user manual, section 4; note rollback is currently broken, C4), then remove the tasks by hand:
    ```powershell
-   schtasks /Query /TN "DevShield\DS_SilentSummer" /FO LIST
+   schtasks /Query /TN "\DevShield\" 2>$null   # list what is left
+   foreach ($t in "DS_SilentSummer","DS_GamingGear","DS_DevMode","DS_Privacy","DS_TorHarden","DS_Guardian","DS_Dashboard","DS_Rollback") { schtasks /Delete /TN "DevShield\$t" /F }
    ```
 
 ---

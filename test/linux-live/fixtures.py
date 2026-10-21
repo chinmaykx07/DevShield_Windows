@@ -6,6 +6,8 @@
 #   fixtures.py probe [UID]       one UDP send out of dstest0: prints ok or EPERM
 #   fixtures.py udpsend IP PORT [SPORT]   one UDP send to IP:PORT: ok or EPERM
 #   fixtures.py catalog SRC DST   write a catalog with the test agent added
+#   fixtures.py listener          an uncatalogued program that only behaves like an
+#                                 agent: it serves on Ollama's port 11434
 #
 # The agent's name is assembled here at run time and never written in any
 # file or command line of the harness, so the harness's own shells can
@@ -119,6 +121,12 @@ def main():
             print("ok")
         except PermissionError:
             print("EPERM")
+    elif role == "listener":
+        ls = socket.socket()
+        ls.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        ls.bind(("127.0.0.1", 11434))
+        ls.listen(5)
+        threading.Event().wait()
     elif role == "catalog":
         c = json.load(open(sys.argv[2]))
         c["agents"].append({"name": "Live Test Agent", "vendor": "test", "kind": "cli", "cmdline_patterns": [AGENT]})

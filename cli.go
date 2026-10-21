@@ -61,8 +61,10 @@ Usage:
   sudo devshield lockdown on [--via IFACE]... [--endpoint IP:PORT/PROTO]...
                     [--user NAME]... [--tor] [--only-allowed] [--lan] [--strict]
                     [--confirm-within 2m]
-                                  nothing leaves except through the tunnel, the
-                                  tunnel's servers and the users you name
+                                  nothing leaves except through the interfaces, to the
+                                  endpoints, as the users and by the allowed agents you
+                                  name (--endpoint alone is refused: it needs --via,
+                                  --user, --tor or --only-allowed)
   sudo devshield lockdown confirm keep a lockdown started with --confirm-within
   sudo devshield lockdown off
   sudo devshield restore-all      undo every system change DevShield made (network rules,

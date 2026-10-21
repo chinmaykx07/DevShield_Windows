@@ -12,17 +12,17 @@ There are two variants, at different stages:
 
 | Feature | Linux | Windows |
 |---|---|---|
-| AI agent detection (Agent Watch) | ✅ unit-tested; live-tested in namespaces | ⚠ compiles, **never run on Windows** |
+| AI agent detection (Agent Watch) | ✅ unit-tested; live-tested in namespaces (a catalogued agent, and an uncatalogued program found by behaviour alone: listening on a model port) | ⚠ compiles, **never run on Windows** |
 | Block one agent's network / lockdown (tunnel, Tor, chosen users) | ✅ live-tested against the real kernel in namespaces (`test/linux-live/`); not yet with a real VPN/Tor or under systemd | — not implemented |
 | Telemetry sinkhole (hosts file) | ✅ unit-tested; restore checked live on a simulated tree | ⚠ script exists, not tested on Windows |
 | LAN privacy (LLMNR/mDNS, MAC randomisation) | ⚠ tested on a simulated system only | ⚠ in `tor_hardening.ps1`, not tested |
 | Thermal profiles | ⚠ tested on simulated kernel layouts, **not on real hardware** | ⚠ scripts exist, not tested on Windows |
 | Network monitor | ✅ live-tested in a namespace (TCP only) | ❌ crashes in its main loop; unknown-process alerts never fire (C5) |
-| Undo everything | ✅ `devshield restore-all`, live-tested on a simulated tree | ❌ rollback restores nothing and still reports success (C4) |
-| Tor kill switch | ✅ via `lockdown on --tor` (see above) | ❌ creates only *allow* rules, so it blocks nothing (C6) |
+| Undo everything | ✅ `devshield restore-all`, live-tested: thermal, hosts and LAN privacy on a simulated tree; lockdown and allowed/blocked agents on the real kernel in namespaces | ❌ rollback restores nothing and still reports success (C4) |
+| Tor kill switch | ⚠ `lockdown on --tor` = lockdown that lets only the Tor daemon's account out; the account lookup is unit-tested and per-user lockdown is live-tested, but never with a real Tor daemon | ❌ creates only *allow* rules, so it blocks nothing (C6) |
 | One-time admin setup | — (systemd unit, not yet run under systemd) | ❌ task registration always fails (C1), first run can't run unattended (C2), tray actions stop at a prompt (C3) |
 
-C1–C8 refer to [docs/REVIEW_NOTES_2026-10-20.md](docs/REVIEW_NOTES_2026-10-20.md). DevShield makes **no network connection on its own**: update checks happen only when you click "Check for updates".
+C1–C8 refer to [docs/REVIEW_NOTES_2026-10-20.md](docs/REVIEW_NOTES_2026-10-20.md). DevShield sends no data anywhere and checks for updates only when you click "Check for updates". It does make **DNS lookups on its own**, through your normal resolver: the LLM API host names in its catalog every 15 minutes (Linux daemon and Windows tray, to recognise agent connections), and on Linux the telemetry domains every 30 minutes (for the network monitor). Your DNS server sees these names being looked up.
 
 > ⚠️ Experimental / intermediate-stage warning
 > DevShield is currently in an intermediate development stage and has not yet been validated through rigorous, broad real-world testing. The project may contain bugs, incomplete features, or behavior that could affect system stability, privacy settings, or network access. Anyone installing, downloading, or forking this repository should treat it as experimental software and use it at their own risk. We strongly recommend testing it on a disposable or non-critical Windows system, creating a restore point or backup first, and reviewing the scripts before execution.
@@ -106,7 +106,8 @@ Disables DiagTrack service. Applies registry privacy tweaks.
 # Apply
 pwsh -File scripts\hardening\privacy_enforcer.ps1
 
-# Remove (full rollback)
+# Remove the hosts-file block ONLY: DiagTrack and the registry tweaks stay
+# changed, and rollback.ps1 is currently broken (C4)
 pwsh -File scripts\hardening\privacy_enforcer.ps1 -Rollback
 ```
 
@@ -131,16 +132,16 @@ pwsh -File scripts\hardening\rollback.ps1 -DryRun -All  # preview only
 ```
 
 ### Language toggle
-Switch between English, Sanskrit, or both from the tray or terminal at any time.
+Switch between English, Sanskrit, or both from the tray menu. There is no `devshield-lang` command (earlier docs described one that was never written); from PowerShell the setting can be changed with the functions in `scripts/core/00_core.ps1`:
 
 ```powershell
-# In any terminal session
-devshield-lang          # show current
-devshield-lang EN       # English only
-devshield-lang SA       # संस्कृत केवलम्
-devshield-lang BOTH     # द्विभाषिक (default)
-devshield-lang toggle   # cycle to next
+. scripts\core\00_core.ps1
+Get-DSLanguage            # show current
+Set-DSLanguage -Lang EN   # EN | SA | BOTH (default)
+Switch-DSLanguage         # cycle BOTH → EN → SA
 ```
+
+Not tested on Windows.
 
 ---
 

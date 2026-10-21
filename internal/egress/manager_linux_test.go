@@ -386,3 +386,83 @@ func TestIncomparableListingIsUnverifiable(t *testing.T) {
 		t.Fatalf("EnsureLoaded = %v, %v", again, err)
 	}
 }
+
+// fakeCgroups builds a cgroup tree in a temp dir. A real kernel empties a
+// group as processes leave; here cgroup.procs is static, so a group that
+// had members always looks "still holding" them to Reset.
+func fakeCgroups(t *testing.T, groups map[string]string) (proc, cg string) {
+	proc, cg = t.TempDir(), t.TempDir()
+	os.MkdirAll(filepath.Join(cg, "a"), 0o755)
+	for g, procs := range groups {
+		os.MkdirAll(filepath.Join(cg, g), 0o755)
+		if procs != "" {
+			os.WriteFile(filepath.Join(cg, g, "cgroup.procs"), []byte(procs), 0o644)
+		}
+	}
+	for _, pid := range []string{"100", "200", "300"} {
+		os.MkdirAll(filepath.Join(proc, pid), 0o755)
+		os.WriteFile(filepath.Join(proc, pid, "stat"), []byte(pid+" (x) S 1 x"), 0o644)
+	}
+	return proc, cg
+}
+
+// Reset must release blocked and allowed agents to where they came from,
+// say what it could not trace, and refuse to report success while a
+// quarantine group (and so its cut-off rule) remains.
+func TestResetReleasesAgentsAndReportsStuckQuarantine(t *testing.T) {
+	proc, cg := fakeCgroups(t, map[string]string{QuarantineCgroup: "100\n300\n", AllowedCgroup: ""})
+	var events []string
+	nft := &fakeNft{}
+	m := &Manager{cfg: Config{ProcRoot: proc, Nft: nft.run, NftList: nft.list, StateDir: t.TempDir(),
+		Emit: func(a, d, s string) { events = append(events, a) }}, cgRoot: cg, nftBase: cg,
+		st: state{
+			Blocked: map[string]*Member{"fp1": {ID: "blk1", Origins: map[int]string{100: "/a"}}},
+			Allowed: map[string]*Member{"fp2": {ID: "alw1", Origins: map[int]string{200: "/a"}}},
+		}}
+	did, err := m.Reset()
+	joined := strings.Join(did, " | ")
+	if !strings.Contains(joined, "unblocked blk1 (1 untraceable process(es) stay quarantined)") || !strings.Contains(joined, "disallowed alw1") {
+		t.Errorf("did = %q", did)
+	}
+	if got, _ := os.ReadFile(filepath.Join(cg, "a", "cgroup.procs")); string(got) != "100" {
+		t.Errorf("blocked agent not returned to its origin: %q", got)
+	}
+	if got, _ := os.ReadFile(filepath.Join(cg, "cgroup.procs")); len(got) != 0 {
+		t.Errorf("untraceable quarantined process was let out to the root group: %q", got)
+	}
+	if !slices.Contains(events, "EGRESS_RELEASE_KEPT") {
+		t.Errorf("kept process not reported: %v", events)
+	}
+	if _, statErr := os.Stat(filepath.Join(cg, AllowedCgroup)); statErr == nil {
+		t.Error("empty allowed group was not removed")
+	}
+	if err == nil || !strings.Contains(err.Error(), QuarantineCgroup+" still holds") || !strings.Contains(err.Error(), "stay cut off") {
+		t.Fatalf("stuck quarantine not reported as a failure: %v", err)
+	}
+	if !strings.Contains(nft.last(), "cgroupv2") {
+		t.Errorf("quarantine rule dropped while the group still holds processes:\n%s", nft.last())
+	}
+	if len(m.st.Blocked) != 0 || len(m.st.Allowed) != 0 {
+		t.Errorf("state not cleared: %+v", m.st)
+	}
+}
+
+// A group left behind with no state (crash, deleted state file) is
+// removed when empty and reported.
+func TestResetRemovesLeftoverGroups(t *testing.T) {
+	proc, cg := fakeCgroups(t, map[string]string{QuarantineCgroup: "", AllowedCgroup: ""})
+	nft := &fakeNft{}
+	m := &Manager{cfg: Config{ProcRoot: proc, Nft: nft.run, NftList: nft.list, StateDir: t.TempDir(),
+		Emit: func(a, d, s string) {}}, cgRoot: cg, nftBase: cg,
+		st: state{Blocked: map[string]*Member{}, Allowed: map[string]*Member{}}}
+	did, err := m.Reset()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(did, "removed leftover group "+QuarantineCgroup) || !slices.Contains(did, "removed leftover group "+AllowedCgroup) {
+		t.Fatalf("did = %q", did)
+	}
+	if strings.Contains(nft.last(), "chain egress") {
+		t.Errorf("rules still loaded after a clean reset:\n%s", nft.last())
+	}
+}

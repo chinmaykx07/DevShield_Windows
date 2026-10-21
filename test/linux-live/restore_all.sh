@@ -1,18 +1,24 @@
 #!/bin/sh
 # "restore-all" live check, called by run.sh inside its namespaces:
-#   restore_all.sh BIN WORKDIR
+#   restore_all.sh BIN WORKDIR CGROUP_MOUNT
 # Turns on everything DevShield can change (thermal profile, sinkhole, LAN
-# privacy, lockdown) on a simulated system tree, runs restore-all, and
-# checks every value is back to the original. Prints PASS/FAIL lines and
-# exits non-zero on any failure.
+# privacy, lockdown, an allowed agent) — the thermal, hosts and LAN-privacy
+# parts on a simulated /sys and /etc tree, lockdown and the agent on the
+# real kernel inside run.sh's namespaces — runs restore-all, and checks
+# every value is back to the original. Then blocks the agent and checks a
+# second restore-all releases it. Prints PASS/FAIL lines and exits
+# non-zero on any failure.
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
-BIN=$1 D=$2/restore
+BIN=$1 D=$2/restore CG=$3
 rm -rf "$D"
 mkdir -p "$D"
 SOCK=$D/sock DS="$1 --socket $2/restore/sock" R=$D/root
 fails=0
 check() { if [ "$2" = "$3" ]; then echo "  PASS  $1"; else echo "  FAIL  $1: got '$2', want '$3'"; fails=$((fails + 1)); fi; }
+waitfor() { i=0; while ! sh -c "$2" >/dev/null 2>&1; do i=$((i + 1)); [ $i -gt "$1" ] && return 1; sleep 1; done; }
+lastudp() { sleep 1.5; grep udp "$D/agent.log" | tail -1 | cut -d' ' -f2; }
+agcg() { grep '^0::' /proc/$AG/cgroup | cut -d: -f3; }
 
 # Simulated Intel laptop with systemd-resolved and NetworkManager installed.
 C=$R/sys/devices/system/cpu
@@ -41,10 +47,21 @@ snapshot() { (cd $R && for f in $(find . -type f | sort); do printf '%s %s\n' "$
 snapshot $D/before
 cp $R/etc/hosts $D/hosts.orig
 
-$BIN daemon --state-dir $D/st --socket $SOCK --sys-root $R 2>$D/err &
+$BIN daemon --state-dir $D/st --socket $SOCK --sys-root $R --catalog $2/catalog.json 2>$D/err &
 DMN=$!
 i=0
 until $DS status >/dev/null 2>&1; do i=$((i + 1)); [ $i -gt 10 ] && break; sleep 1; done
+
+# The test agent (see fixtures.py), sanctioned and allowed out of the lockdown.
+python3 $HERE/fixtures.py server $D & SRV=$!
+python3 $HERE/fixtures.py agent $D & AG=$!
+waitfor 10 "test -s $D/kids.pid"
+ORIGCG=$(agcg)
+waitfor 30 "$DS agents | grep -q 'Live Test Agent'"
+ID=$($DS agents --json | python3 -c "import json,sys;print([a for a in json.load(sys.stdin) if a['name']=='Live Test Agent'][0]['id'])")
+$DS sanction "$ID" >/dev/null
+waitfor 15 "$DS agents --json | grep -q '\"verdict\": \"sanctioned\"'"
+$DS allow "$ID" >/dev/null
 
 $DS profile silent >/dev/null
 $DS sinkhole on >/dev/null
@@ -54,6 +71,8 @@ $DS lockdown on --via wg0 >/dev/null
 snapshot $D/during
 check "everything was switched on (files changed)" "$(diff $D/before $D/during | grep -c '^>' | awk '{print ($1 > 5)}')" 1
 check "lockdown active" "$(python3 $HERE/fixtures.py probe)" EPERM
+check "allowed agent goes out during lockdown" "$(lastudp)" ok
+check "allowed agent is in the allowed group" "$(agcg)" /devshield-allowed
 
 $DS restore-all >$D/restore.out
 check "restore-all succeeds" "$?" 0
@@ -62,9 +81,19 @@ check "every value back to the original" "$(diff $D/before $D/after | wc -l | tr
 check "/etc/hosts byte-identical" "$(cmp -s $D/hosts.orig $R/etc/hosts && echo same)" same
 check "network open again" "$(python3 $HERE/fixtures.py probe)" ok
 check "DevShield table removed" "$(nft list table inet devshield >/dev/null 2>&1 && echo present || echo gone)" gone
+check "allowed agent back in its own cgroup" "$(agcg)" "$ORIGCG"
+check "allowed group removed" "$([ -d "$CG/devshield-allowed" ] && echo present || echo gone)" gone
 $DS restore-all >/dev/null
 check "second restore-all is a clean no-op" "$?" 0
-check "both logged" "$($DS events -n 5 | grep -c RESTORE_ALL)" 2
-kill $DMN
+
+$DS block "$ID" >/dev/null
+check "blocked agent cut off" "$(lastudp)" EPERM
+$DS restore-all >/dev/null
+check "restore-all with a blocked agent succeeds" "$?" 0
+check "blocked agent released to its own cgroup" "$(agcg)" "$ORIGCG"
+check "blocked agent goes out again" "$(lastudp)" ok
+check "quarantine group removed" "$([ -d "$CG/devshield-quarantine" ] && echo present || echo gone)" gone
+check "all three logged" "$($DS events -n 30 | grep -c RESTORE_ALL)" 3
+kill $DMN $SRV $AG $(cat $D/kids.pid) 2>/dev/null
 echo "== restore-all: $fails failed"
 [ $fails = 0 ]

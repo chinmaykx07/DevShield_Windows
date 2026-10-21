@@ -43,9 +43,11 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   it is re-quarantined after a restart.
   `sudo devshield lockdown on --via IFACE | --endpoint IP:PORT/PROTO |
   --user NAME | --tor [--lan] [--strict] [--confirm-within D]` allows
-  outbound traffic only through the chosen tunnel/users. This is a Tor
-  kill switch and its alternative for networks that block Tor: no DNS or
-  IPv6 leaks, DNS never goes to the LAN, and replies to inbound SSH still
+  outbound traffic only through the chosen tunnel/users. With `--tor` it
+  is a Tor kill switch (never yet tried with a real Tor daemon), and the
+  other options are its alternative for networks that block Tor: DNS and
+  IPv6 can't leave except that way (by the final drop rule, not probed
+  separately), `--lan` stops DNS going to the LAN, and replies to inbound SSH still
   work unless `--strict` is set. There is a dead-man auto-revert. A
   removed or altered rule is detected (the kernel's rules are compared
   with the expected ones) and restored within 10 s, and logged.
@@ -62,7 +64,8 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 - Linux LAN privacy (`sudo devshield lan-privacy on|off`): LLMNR and mDNS
   off (systemd-resolved, NetworkManager), a random Wi-Fi MAC per network
   and while scanning, and IPv6 privacy addresses. Only DevShield's own
-  drop-in files are written, so `off` is an exact undo. Status reports the
+  drop-in files are written, plus the live IPv6 privacy setting, whose
+  original value `off` writes back. Status reports the
   effective state and warns about Avahi and nmbd. Tested on a simulated
   system tree; not yet with real resolved, NetworkManager or Wi-Fi.
 - Linux network monitor (`devshield net`): outbound TCP connections per
@@ -73,7 +76,9 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 - `sudo devshield restore-all`: undoes every system change DevShield made
   (network rules and groups, thermal, sinkhole, LAN privacy including the
   live IPv6 value), reporting each step. Approvals and the log are kept.
-  Verified on a simulated tree: every value back to the original.
+  Live-tested: thermal, /etc/hosts and LAN privacy on a simulated tree
+  (every value back to the original); lockdown and allowed and blocked
+  agents on the real kernel in namespaces.
 - `test/linux-live/run.sh`: repeatable live tests of the network controls
   against the real kernel, nftables and daemon, inside namespaces.
 - Tamper-evident, hash-chained audit log: edits, deletions, reordering and
@@ -88,11 +93,24 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   35 to 0. CI now runs vet, race tests and govulncheck on Linux and Windows.
 
 ### Fixed
+- Messages that claimed more than happened (found in a second audit of
+  every user-visible message): unblock/disallow/restore-all now say when
+  a process stayed quarantined, lost its allowance or went to the root
+  cgroup instead of its own, and exit 3; `lan-privacy off` says whether
+  the original IPv6 value was really written back and reports failed
+  service reloads; rules DevShield can't compare are reported as UNKNOWN
+  (`EGRESS_RULES_UNVERIFIABLE`), not as tampering; a damaged sinkhole
+  block, an audit log that couldn't be checked and blocked agents not yet
+  cut off (⏳) are shown; refused-request summaries are per user and kind,
+  and are written before `DAEMON_STOPPED`; a thermal setting that appears
+  after the first profile is restored too; a sanctioned agent whose file
+  can't be hashed is flagged risky; a stuck allowed group is no longer
+  said to keep a rule loaded.
 - 2026-10-21 independent audit (four reviewers; every finding was
   reproduced or traced before fixing; regression tests added):
   - Lockdown ignored traffic forwarded for containers/VMs (added a forward
     chain). Its DHCP rule let any program send UDP to port 67/547 anywhere
-    (now local link only). Logging wasn't rate-limited (statement order).
+    (now only to private address ranges and broadcast). Logging wasn't rate-limited (statement order).
     `--lan` let mDNS/LLMNR/NetBIOS out.
   - An unconfirmed `--confirm-within` lockdown could be saved to disk by
     other saves and come back after a restart; a stale timer could revert
@@ -144,8 +162,9 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   network access to programs that were never identified as the agent. It
   now allows only identified processes (and what they start later).
 - systemd unit: `ProtectSystem=strict` left `/etc/hosts` read-only, so the
-  sinkhole could not have worked under systemd. It is now the one
-  `ReadWritePaths` entry. `ProtectControlGroups` is dropped (quarantine
+  sinkhole could not have worked under systemd. `ReadWritePaths` now
+  lists it with the LAN-privacy directories (`/etc/systemd/resolved.conf.d`,
+  `/etc/sysctl.d`, and `/etc/NetworkManager/conf.d` if present). `ProtectControlGroups` is dropped (quarantine
   writes `/sys/fs/cgroup`) and `CAP_NET_ADMIN` added (nftables).
 - App froze on Quit (`closeAudit` self-deadlock on `auditMu`).
 
@@ -162,6 +181,11 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 ## [0.1.0] — unreleased
 
 ### Added
+(As first written. Several of these do not work today: automatic rollback
+and full rollback (C4), the Tor kill-switch (C6), the network guardian's
+alerts (C5) and single-UAC setup (C1–C3), and LibreHardwareMonitor's
+download is not hash-verified. See the README's status table and
+`docs/REVIEW_NOTES_2026-10-20.md`.)
 - Thermal profiles: Silent Summer, Gaming Gear, Dev Mode — each with
   before/after sensor verification and automatic rollback on failure
 - Privacy enforcer: telemetry hosts-file sinkhole (51 domains),

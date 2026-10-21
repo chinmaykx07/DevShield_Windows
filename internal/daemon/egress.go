@@ -272,7 +272,8 @@ func lockdownFrom(r *ipc.LockdownRequest) (egress.Lockdown, error) {
 	return l, l.Validate()
 }
 
-func lookupUser(s string) (int, error) {
+// lookupUser is a variable so tests can supply accounts.
+var lookupUser = func(s string) (int, error) {
 	if uid, err := strconv.Atoi(s); err == nil {
 		return uid, nil
 	}

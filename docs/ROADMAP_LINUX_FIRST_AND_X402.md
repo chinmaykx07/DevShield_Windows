@@ -18,7 +18,7 @@ Status: decisions taken 2026-10-20 (section 7). Section 8 covers the owner-sover
 | Area | State |
 |---|---|
 | Go core | Builds and vets for Windows and Linux. 100 unit-test functions (race detector clean), plus a live Linux suite (`test/linux-live/`, 73 checks per cgroup layout). |
-| Agent Watch (AI/rogue agents) | Behaviour plus catalog identity. Unit-tested, including the false positives found in the 2026-10-21 audit. Its live use is the fake agent in `test/linux-live/`. **Not run on Windows.** |
+| Agent Watch (AI/rogue agents) | Behaviour plus catalog identity. Unit-tested, including the false positives found in the 2026-10-21 audit. Live-tested in `test/linux-live/` with a catalogued fake agent and an uncatalogued program caught by behaviour alone (a model port); the other behaviour signals are unit-tested only. **Not run on Windows.** |
 | PowerShell features (profiles, privacy, Tor, guardian, rollback, dashboard) | **Windows-only and largely non-functional as wired.** Tasks never register, prompts block, rollback restores nothing, the guardian crashes, the Tor kill-switch blocks nothing. See the review notes. |
 | Linux support | Root daemon + CLI: Agent Watch, network block/allow/lockdown, sinkhole, LAN privacy, network monitor, thermal, sensors, restore-all. See the progress list for how each is tested. Not yet run under systemd; no tray. |
 | Packaging | Windows: Inno Setup + winget manifests (installer never built by CI). Linux: systemd units in `packaging/linux/`, no .deb/.rpm yet. |
@@ -43,7 +43,7 @@ Measured once, by hand, in this development container (78 processes), before the
 
 ```
 cmd/devshield/            tray app + headless daemon/CLI (same binary)
-internal/agentwatch/      detection (pure, shared) — today's agentwatch*.go
+internal/agentwatch/      detection (pure, shared) — done
 internal/audit/           SQLite audit log — today's audit.go
 internal/platform/        one interface per capability, two backends:
     thermal   sensors   hosts   firewall   autostart   privileged-helper
@@ -140,7 +140,7 @@ It was started by Coinbase and is now governed by an x402 foundation. It has Go 
 - ✅ Corrections (2026-10-21), all found by testing. A shell was identified as an agent because of its inline command's text. Block/allow could act on stale or reused PIDs (now checked by PID + start time). Allow swept in pre-existing children (now only identified processes). Live tests are now in the repo (`test/linux-live/`), built so they cannot detect themselves.
 - ✅ LAN privacy (`internal/lanprivacy`, `devshield lan-privacy on|off`): LLMNR/mDNS off, Wi-Fi MAC randomisation, IPv6 privacy addresses, warnings for Avahi/nmbd; only DevShield's own drop-ins. Tested on a simulated tree, **not yet** with real resolved/NetworkManager/Wi-Fi.
 - ✅ Network monitor (`internal/netwatch`, `devshield net`): reuses Agent Watch's per-scan connection data, categorises it, logs telemetry once a day per program and host, and lists outbound connections only. Verified live in a namespace. TCP only so far.
-- ✅ Rollback in Go (`devshield restore-all`): every feature's exact undo in one command, with honest per-step results. Verified live: every value back to the original after everything was switched on. Writing that test found that `lan-privacy off` left the live IPv6 value changed, and that a leftover quarantine group could keep its rule loaded while restore reported success. Both are fixed.
+- ✅ Rollback in Go (`devshield restore-all`): every feature's exact undo in one command, with honest per-step results. Verified live: every value back to the original after everything was switched on (thermal, hosts and LAN privacy on a simulated tree; lockdown and allowed/blocked agents on the real kernel in namespaces). Writing that test found that `lan-privacy off` left the live IPv6 value changed, and that a leftover quarantine group could keep its rule loaded while restore reported success. Both are fixed.
 - ⏭ Remaining for Linux parity: Linux tray → .deb/.rpm.
 
 ### Revised phases

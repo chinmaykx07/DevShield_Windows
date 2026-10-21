@@ -5,7 +5,7 @@ Goal (kept deliberately simple):
 1. **Know every AI agent running on this machine.**
 2. **Alert when an unknown or new agent / AI process appears.**
 
-**Status:** Phase 1 ("Agent Watch") is implemented in `agentwatch*.go`, `tray_agents.go` and `assets/agent_catalog.json`, with unit tests and a live end-to-end test (a renamed, undocumented fake agent caught as a rogue suspect from behaviour alone). It is **behaviour-first**: the catalog is only an identity label, and rogue verdicts come from behaviour plus rogue indicators (see section 4b). It is not yet tested on Windows. Not built yet: the MCP config-file scan (S4), event-based process capture (Phase 2) and Phase 3.
+**Status:** Phase 1 ("Agent Watch") is implemented in `internal/agentwatch/` (catalog: `internal/agentwatch/catalog.json`) and, for the Windows tray, `tray_agents.go`, with unit tests and Linux live tests (`test/linux-live/`: a catalogued fake agent, and an uncatalogued program caught as a rogue suspect from behaviour alone, by listening on a model port). It is **behaviour-first**: the catalog is only an identity label, and rogue verdicts come from behaviour plus rogue indicators (see section 4b). It is not yet tested on Windows. Not built yet: the MCP config-file scan (S4), event-based process capture (Phase 2) and Phase 3.
 
 ---
 
@@ -60,7 +60,7 @@ The industry framing: **OWASP Top 10 for Agentic Applications (Dec 2025), ASI10 
 ### Phase 1: "Agent Watch" in the Go tray (no admin, no new dependencies)
 Run it in **Go** with **gopsutil** (already used by `context.go`), *not* as a PowerShell `Start-Job`. That also avoids the guardian lifetime bug found in the code review (C5).
 
-1. **Agent catalog**: a `scripts/monitor/agent_catalog.json` (same idea as the blocklist), one entry per agent:
+1. **Agent catalog** (built as `internal/agentwatch/catalog.json`, embedded in the binary): one entry per agent:
    ```json
    { "name": "Claude Code", "vendor": "Anthropic", "kind": "cli",
      "process_names": ["claude.exe"],

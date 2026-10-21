@@ -4,6 +4,8 @@
 **Project version target:** v0.1.0 → v0.5.0 → v1.0.0  
 **Status:** Code complete with known gaps. Build blocked by 3 missing artifacts.
 
+> **Historical document (June 2026), kept as written.** Its status and checklists are out of date: for example it plans six scheduled tasks (there are eight) and a `devshield-lang` command (never written), and "code complete" predates the review that found the Windows core features broken. For the current state see the README's status table, `docs/REVIEW_NOTES_2026-10-20.md` and `docs/ROADMAP_LINUX_FIRST_AND_X402.md`.
+
 ---
 
 ## Table of Contents
