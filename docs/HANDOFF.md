@@ -65,9 +65,18 @@ Go module `github.com/chinmaykx07/DevShield_Windows`, toolchain go1.27.3
 `main`, tags, PRs into `main`, or by hand ("Run workflow" in the Actions
 tab, added after `222f667`). So the tests have never run natively on
 Windows, and the CI live-test job has never run on GitHub's runners.
-**First step of the next session:** ask the owner to run the workflow by
-hand on this branch (it uses their Actions minutes), then fix whatever
-fails.
+**First CI run (by hand, run 39549081862 on `86a1414`): all three jobs
+failed.**
+
+| Job | What failed |
+|---|---|
+| Windows tests | Only `TestBaselineFileIsRootOnly`, which checks Unix file modes (now skipped on Windows, after `86a1414`); every other package passed natively. |
+| Linux tests on GitHub's runner | One package failed; it wasn't identified (read the full log). It likely assumes root or this dev container. |
+| Live suite on GitHub's runner | Some checks failed; read the full log for which ones. |
+
+govulncheck didn't run, because it is skipped after a failure.
+**First step of the next session:** open that run's logs (Actions tab),
+fix, and re-run by hand until green.
 
 Unit-test coverage (`go test -cover`):
 

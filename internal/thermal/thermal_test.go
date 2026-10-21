@@ -1,6 +1,7 @@
 package thermal
 
 import (
+	"runtime"
 	"os"
 	"path/filepath"
 	"strings"
@@ -112,6 +113,9 @@ func TestSilentThenGamingThenOffRestoresOriginal(t *testing.T) {
 }
 
 func TestBaselineFileIsRootOnly(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix file modes; thermal profiles in Go are Linux-only")
+	}
 	root, state := intelMachine(t), t.TempDir()
 	if _, err := Apply(Detect(root), Dev, state); err != nil {
 		t.Fatal(err)
