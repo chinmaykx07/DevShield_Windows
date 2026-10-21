@@ -75,7 +75,11 @@ check "allowed agent goes out during lockdown" "$(lastudp)" ok
 check "allowed agent is in the allowed group" "$(agcg)" /devshield-allowed
 
 $DS restore-all >$D/restore.out
-check "restore-all succeeds" "$?" 0
+# Exit 3 = done with caveats. Here the only caveats may be the two service
+# reloads, which can't work in a namespace without systemd/nmcli.
+check "restore-all ran every step (exit 3: caveats only)" "$?" 3
+check "no step failed" "$(grep -c '❌' $D/restore.out)" 0
+check "the only notes are the two service reloads" "$(grep '^ *⚠' $D/restore.out | grep -vc 'did not reload')" 0
 snapshot $D/after
 check "every value back to the original" "$(diff $D/before $D/after | wc -l | tr -d ' ')" 0
 check "/etc/hosts byte-identical" "$(cmp -s $D/hosts.orig $R/etc/hosts && echo same)" same
