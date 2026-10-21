@@ -678,6 +678,41 @@ func (w *Watcher) ResolveID(id string) (string, error) {
 	return "", fmt.Errorf("id %q is ambiguous (%d agents)", id, len(match))
 }
 
+// ResolveKnown is like ResolveID but also finds agents seen before that
+// are not running now (from the agent database), so policy such as a
+// network block can be set before an agent comes back.
+func (w *Watcher) ResolveKnown(id string) (fingerprint, name, short string, err error) {
+	if fp, rerr := w.ResolveID(id); rerr == nil {
+		for _, a := range w.Running() {
+			if a.Fingerprint == fp {
+				return fp, a.Name, a.ID, nil
+			}
+		}
+	} else if strings.Contains(rerr.Error(), "ambiguous") {
+		return "", "", "", rerr
+	}
+	if w.cfg.DB == nil {
+		return "", "", "", fmt.Errorf("no agent with id %q", id)
+	}
+	recs, err := listAgents(w.cfg.DB)
+	if err != nil {
+		return "", "", "", err
+	}
+	var hits []AgentRecord
+	for _, r := range recs {
+		if r.Fingerprint == id || (id != "" && strings.HasPrefix(shortID(r.Fingerprint), strings.ToLower(id))) {
+			hits = append(hits, r)
+		}
+	}
+	switch len(hits) {
+	case 0:
+		return "", "", "", fmt.Errorf("no agent with id %q has been seen", id)
+	case 1:
+		return hits[0].Fingerprint, hits[0].Name, shortID(hits[0].Fingerprint), nil
+	}
+	return "", "", "", fmt.Errorf("id %q is ambiguous (%d agents)", id, len(hits))
+}
+
 // OnChange registers a callback fired when the running set, a verdict or
 // a sanction status changes.
 func (w *Watcher) OnChange(cb func()) {

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -20,12 +21,6 @@ type fakeNft struct {
 func (f *fakeNft) run(script string, check bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if strings.HasPrefix(script, "list ") {
-		if len(f.loaded) > 0 && strings.Contains(f.loaded[len(f.loaded)-1], "chain egress") {
-			return nil
-		}
-		return errors.New("no such table")
-	}
 	if check {
 		if f.reject {
 			return errors.New("syntax error")
@@ -34,6 +29,16 @@ func (f *fakeNft) run(script string, check bool) error {
 	}
 	f.loaded = append(f.loaded, script)
 	return nil
+}
+
+// list returns what the kernel would hold: the last loaded script.
+func (f *fakeNft) list() (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.loaded) == 0 || !strings.Contains(f.loaded[len(f.loaded)-1], "chain egress") {
+		return "", errors.New("no such table")
+	}
+	return f.loaded[len(f.loaded)-1], nil
 }
 
 func (f *fakeNft) last() string {
@@ -47,7 +52,7 @@ func (f *fakeNft) last() string {
 
 func newTestManager(t *testing.T, nft *fakeNft, dir string) *Manager {
 	t.Helper()
-	m, err := New(Config{StateDir: dir, ProcRoot: t.TempDir(), CgroupRoot: "", Nft: nft.run})
+	m, err := New(Config{StateDir: dir, ProcRoot: t.TempDir(), CgroupRoot: "", Nft: nft.run, NftList: nft.list})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,6 +133,52 @@ func TestEnsureLoadedRestoresFlushedRules(t *testing.T) {
 	if again, err := m.EnsureLoaded(); !again || err != nil || !strings.Contains(nft.last(), "wg0") {
 		t.Fatalf("rules not restored (again=%v err=%v)", again, err)
 	}
+	// Removing just the final drop (table still there) is caught too.
+	nft.loaded = append(nft.loaded, strings.Replace(nft.last(), "counter drop comment \"devshield lockdown: everything else\"", "", 1))
+	if again, _ := m.EnsureLoaded(); !again {
+		t.Fatal("a removed rule inside the table went unnoticed")
+	}
+}
+
+// The kernel's listing (counters, bursts) must compare equal to our script.
+func TestRuleShapeMatchesNftListing(t *testing.T) {
+	script, _ := Render(Policy{Lockdown: &Lockdown{Interfaces: []string{"lo2"}}, KillFlows: []Flow{{Proto: "tcp", LocalPort: 8080}}})
+	listing := `table inet devshield {
+	chain egress {
+		type filter hook output priority filter; policy accept;
+		tcp sport 8080 counter packets 0 bytes 0 drop comment "quarantined socket"
+		oifname "lo" accept
+		ct direction reply accept comment "replies to inbound connections"
+		oifname "lo2" accept comment "tunnel"
+		udp dport { 67, 547 } accept comment "dhcp"
+		icmpv6 type { nd-router-solicit, nd-neighbor-solicit, nd-neighbor-advert } accept comment "ipv6 neighbour discovery"
+		log prefix "devshield-lockdown-drop " level info limit rate 5/minute burst 5 packets
+		counter packets 3 bytes 180 drop comment "devshield lockdown: everything else"
+	}
+}`
+	if a, b := ruleShape(script), ruleShape(listing); !slices.Equal(a, b) || len(a) != 8 {
+		t.Fatalf("shapes differ:\n%v\n%v", a, b)
+	}
+}
+
+func TestTidyDropsRulesOfClosedSockets(t *testing.T) {
+	proc := t.TempDir()
+	os.MkdirAll(filepath.Join(proc, "net"), 0o755)
+	os.MkdirAll(filepath.Join(proc, "4242"), 0o755)
+	// One live listener on 127.0.0.1:631.
+	os.WriteFile(filepath.Join(proc, "net", "tcp"), []byte("  sl  local_address rem_address   st\n"+
+		"   0: 0100007F:0277 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 18311 1\n"), 0o644)
+	m := &Manager{cfg: Config{ProcRoot: proc}, st: state{Blocked: map[string]*Blocked{"fp": {
+		Origins: map[int]string{4242: "/a", 999999: "/b"},
+		Flows:   []Flow{{Proto: "tcp", LocalIP: "127.0.0.1", LocalPort: 631}, {Proto: "tcp", LocalPort: 8080}},
+	}}}}
+	if !m.tidy() {
+		t.Fatal("tidy reported no change")
+	}
+	b := m.st.Blocked["fp"]
+	if len(b.Flows) != 1 || b.Flows[0].LocalPort != 631 || len(b.Origins) != 1 || b.Origins[4242] != "/a" {
+		t.Fatalf("after tidy: %+v", b)
+	}
 }
 
 func TestFindCgroup2AndDescendants(t *testing.T) {
@@ -156,7 +207,7 @@ func TestFindCgroup2AndDescendants(t *testing.T) {
 	if len(d) != 2 || !d[101] || !d[102] {
 		t.Fatalf("descendants = %v", d)
 	}
-	if o, ok := originFor(proc, 102, map[int]string{100: "/user.slice"}); !ok || o != "/user.slice" {
+	if o, ok := originFor(parents(proc), 102, map[int]string{100: "/user.slice"}); !ok || o != "/user.slice" {
 		t.Fatalf("origin = %q %v", o, ok)
 	}
 }

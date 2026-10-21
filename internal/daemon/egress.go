@@ -42,9 +42,9 @@ func (d *Daemon) startEgress() {
 				d.reconcileEgress()
 				if again, err := m.EnsureLoaded(); again {
 					if err != nil {
-						d.event("EGRESS_RULES_MISSING", "DevShield's firewall table was removed and could not be restored: "+err.Error(), "fail")
+						d.event("EGRESS_RULES_MISSING", "DevShield's firewall rules were removed or altered and could not be restored: "+err.Error(), "fail")
 					} else {
-						d.event("EGRESS_RULES_RESTORED", "DevShield's firewall table had been removed by something else; restored", "warn")
+						d.event("EGRESS_RULES_RESTORED", "DevShield's firewall rules had been removed or altered by something else; restored", "warn")
 					}
 				}
 			}
@@ -90,15 +90,15 @@ func (d *Daemon) setBlock(op, id string, peer ipc.Peer) ipc.Response {
 		return d.egressStatus()
 	}
 
-	fp, err := d.watcher.ResolveID(id)
+	// Agents seen before but not running now can be blocked too: they are
+	// cut off the moment they reappear.
+	fp, name, short, err := d.watcher.ResolveKnown(id)
 	if err != nil {
 		return ipc.Response{Error: err.Error()}
 	}
-	var name, short string
 	var pids []int
 	for _, a := range d.watcher.Running() {
 		if a.Fingerprint == fp {
-			name, short = a.Name, a.ID
 			for _, p := range a.PIDs {
 				pids = append(pids, int(p))
 			}

@@ -1,0 +1,28 @@
+# Loads DevShield's saved network rules (lockdown, blocked agents) at boot,
+# BEFORE any network interface comes up, so a kill switch has no window in
+# which traffic can leave unprotected. The main daemon re-applies and
+# watches them afterwards. Same ordering as the distribution's own
+# nftables.service.
+[Unit]
+Description=DevShield network policy (early boot)
+Documentation=https://github.com/chinmaykx07/DevShield_Windows/blob/main/docs/USER_MANUAL.md
+DefaultDependencies=no
+Wants=network-pre.target
+Before=network-pre.target shutdown.target
+After=local-fs.target
+Conflicts=shutdown.target
+ConditionPathExists=/var/lib/devshield/egress.json
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/devshield egress-restore
+CapabilityBoundingSet=CAP_NET_ADMIN
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+
+[Install]
+WantedBy=sysinit.target

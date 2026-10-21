@@ -46,7 +46,11 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   kill switch and its alternative for networks that block Tor: no DNS or
   IPv6 leaks, DNS never goes to the LAN, and replies to inbound SSH still
   work unless `--strict` is set. There is a dead-man auto-revert. A
-  removed table is restored within 10 s and logged. Tested live in
+  removed or altered rule is detected (the kernel's rules are compared
+  with the expected ones) and restored within 10 s, and logged.
+  `devshield-egress.service` loads the saved rules at boot before the
+  network starts. Agents seen before can be blocked while not running.
+  Rules for closed sockets are dropped automatically. Tested live in
   network namespaces (unified and hybrid cgroups); not yet with a real
   VPN/Tor setup or under systemd.
 - Tamper-evident, hash-chained audit log: edits, deletions, reordering and

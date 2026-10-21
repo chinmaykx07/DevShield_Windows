@@ -15,6 +15,7 @@ type Config struct {
 	ProcRoot   string
 	CgroupRoot string
 	Nft        func(script string, check bool) error
+	NftList    func() (string, error)
 	Emit       func(action, detail, status string)
 }
 

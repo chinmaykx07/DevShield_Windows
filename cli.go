@@ -64,6 +64,8 @@ Usage:
                                   tunnel's servers and the users you name
   sudo devshield lockdown confirm keep a lockdown started with --confirm-within
   sudo devshield lockdown off
+  devshield egress-restore        load the saved network rules and exit (run at boot,
+                                  before the network starts, by devshield-egress.service)
   devshield version
 
 Global flag (before or after the command): --socket PATH (default ` + ipc.DefaultSocket + `)
@@ -149,6 +151,8 @@ func runCLI(args []string, stdout, stderr io.Writer) int {
 		return 0
 	case "lockdown":
 		return cliLockdown(cargs, socket, stdout, stderr)
+	case "egress-restore":
+		return cliEgressRestore(cargs, stdout, stderr)
 	case "verify-log":
 		path := daemon.DefaultStateDir + "/audit.log"
 		if len(cargs) > 0 {
@@ -523,4 +527,24 @@ func printEgress(e *egress.Status, stdout io.Writer) {
 	if !e.RulesLoaded {
 		fmt.Fprintln(stdout, "  ⚠ the kernel does not have DevShield's firewall table loaded (the daemon re-applies it within 10 s)")
 	}
+}
+
+// cliEgressRestore loads the saved network policy into the kernel without
+// starting the daemon, so a lockdown is in force before any network
+// interface comes up at boot.
+func cliEgressRestore(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("egress-restore", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	stateDir := fs.String("state-dir", daemon.DefaultStateDir, "root-only state directory")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	m, err := egress.New(egress.Config{StateDir: *stateDir})
+	if err != nil {
+		fmt.Fprintf(stderr, "devshield egress-restore: %v\n", err)
+		return 1
+	}
+	st := m.Status()
+	fmt.Fprintf(stdout, "network policy restored: lockdown %v, %d blocked agents\n", st.Lockdown != nil, len(st.Blocked))
+	return 0
 }

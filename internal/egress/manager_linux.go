@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -22,8 +23,10 @@ type Config struct {
 	ProcRoot   string // "" = /proc
 	CgroupRoot string // "" = find the cgroup2 mount in /proc/self/mountinfo
 	// Nft runs an nft script (check=true: validate only). nil = the nft binary.
-	Nft  func(script string, check bool) error
-	Emit func(action, detail, status string)
+	Nft func(script string, check bool) error
+	// NftList prints DevShield's chain as the kernel has it. nil = nft.
+	NftList func() (string, error)
+	Emit    func(action, detail, status string)
 }
 
 // Blocked is one quarantined agent.
@@ -78,6 +81,9 @@ func New(cfg Config) (*Manager, error) {
 	if cfg.Nft == nil {
 		cfg.Nft = runNft
 	}
+	if cfg.NftList == nil {
+		cfg.NftList = listNft
+	}
 	if cfg.Emit == nil {
 		cfg.Emit = func(string, string, string) {}
 	}
@@ -100,6 +106,7 @@ func New(cfg Config) (*Manager, error) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.tidy() // after a reboot, saved processes and sockets are long gone
 	if len(m.st.Blocked) > 0 && m.cgRoot != "" {
 		if err := os.MkdirAll(m.quarantineDir(), 0o755); err != nil {
 			return nil, err
@@ -311,8 +318,9 @@ func (m *Manager) Unblock(fp string) error {
 		return errors.New("that agent is not blocked")
 	}
 	if m.cgRoot != "" {
+		pp := parents(m.cfg.ProcRoot)
 		for _, pid := range m.members() {
-			if origin, ok := originFor(m.cfg.ProcRoot, pid, b.Origins); ok {
+			if origin, ok := originFor(pp, pid, b.Origins); ok {
 				m.moveTo(pid, origin)
 			}
 		}
@@ -344,6 +352,7 @@ func (m *Manager) Reconcile(running map[string][]int) []string {
 	if m.cgRoot == "" {
 		return nil
 	}
+	changed := m.tidy()
 	var caught []string
 	for fp, b := range m.st.Blocked {
 		var loose []int
@@ -363,25 +372,43 @@ func (m *Manager) Reconcile(running map[string][]int) []string {
 			caught = append(caught, b.ID)
 		}
 	}
-	if len(caught) > 0 {
+	if len(caught) > 0 || changed {
 		if err := m.apply(); err != nil {
 			m.cfg.Emit("EGRESS_APPLY_FAILED", err.Error(), "fail")
 		}
-		m.prune()
-		m.save()
+		if err := m.save(); err != nil {
+			m.cfg.Emit("EGRESS_SAVE_FAILED", err.Error(), "fail")
+		}
 	}
 	return caught
 }
 
-// prune forgets origins of processes that have exited (caller holds mu).
-func (m *Manager) prune() {
+// tidy forgets processes that have exited (so a reused PID is never
+// mistaken for the agent) and drops the rules of sockets that no longer
+// exist (so a port the agent once listened on is not blocked for the next
+// program that uses it). It reports whether the ruleset needs reloading.
+// Caller holds mu.
+func (m *Manager) tidy() bool {
+	live := liveFlows(m.cfg.ProcRoot)
+	changed := false
 	for _, b := range m.st.Blocked {
 		for pid := range b.Origins {
 			if _, err := os.Stat(filepath.Join(m.cfg.ProcRoot, strconv.Itoa(pid))); err != nil {
 				delete(b.Origins, pid)
 			}
 		}
+		kept := b.Flows[:0]
+		for _, f := range b.Flows {
+			if live[f] {
+				kept = append(kept, f)
+			}
+		}
+		if len(kept) != len(b.Flows) {
+			changed = true
+		}
+		b.Flows = kept
 	}
+	return changed
 }
 
 // IsBlocked reports whether fp is quarantined.
@@ -535,16 +562,57 @@ func (m *Manager) Status() Status {
 	return st
 }
 
-// rulesLoaded checks the kernel actually has our table when it should.
+// rulesLoaded checks the kernel has exactly our rules: not only that the
+// table exists, but that no rule in it was removed, added, reordered or
+// had its verdict changed.
 func (m *Manager) rulesLoaded() bool {
-	if m.policy().Empty() {
+	p := m.policy()
+	if p.Empty() {
 		return true
 	}
-	return m.cfg.Nft("list table inet "+TableName+"\n", true) == nil
+	want, err := Render(p)
+	if err != nil {
+		return false
+	}
+	have, err := m.cfg.NftList()
+	if err != nil {
+		return false
+	}
+	return slices.Equal(ruleShape(want), ruleShape(have))
 }
 
-// EnsureLoaded re-applies the ruleset if something removed it (e.g. a
-// firewall service ran "flush ruleset"). It reports whether it had to.
+// ruleShape reduces a chain to one "first-word verdict" entry per rule.
+// It reads both our rendered script and nft's listing (which adds counter
+// values and limit bursts but keeps each rule on one line, in order).
+func ruleShape(chain string) []string {
+	var out []string
+	in := false
+	for _, line := range strings.Split(chain, "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(line, "chain egress"):
+			in = true
+			continue
+		case !in || line == "" || strings.HasPrefix(line, "type "):
+			continue
+		case line == "}":
+			return out
+		}
+		if i := strings.Index(line, ` comment "`); i >= 0 {
+			line = line[:i]
+		}
+		f := strings.Fields(line)
+		verdict := f[len(f)-1]
+		if verdict != "accept" && verdict != "drop" {
+			verdict = "-"
+		}
+		out = append(out, f[0]+" "+verdict)
+	}
+	return out
+}
+
+// EnsureLoaded re-applies the ruleset if something removed or altered it
+// (e.g. a firewall service ran "flush ruleset"). It reports whether it had to.
 func (m *Manager) EnsureLoaded() (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -556,22 +624,30 @@ func (m *Manager) EnsureLoaded() (bool, error) {
 
 // ── helpers ──
 
-// runNft feeds a script to the nft binary.
-func runNft(script string, check bool) error {
-	bin := "nft"
+func nftBinary() string {
 	for _, p := range []string{"/usr/sbin/nft", "/sbin/nft", "/usr/bin/nft"} {
 		if _, err := os.Stat(p); err == nil {
-			bin = p
-			break
+			return p
 		}
 	}
+	return "nft"
+}
+
+// listNft prints DevShield's chain from the kernel.
+func listNft() (string, error) {
+	out, err := exec.Command(nftBinary(), "list", "chain", "inet", TableName, "egress").CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
+	}
+	return string(out), nil
+}
+
+// runNft feeds a script to the nft binary.
+func runNft(script string, check bool) error {
+	bin := nftBinary()
 	args := []string{"-f", "-"}
 	if check {
 		args = []string{"-c", "-f", "-"}
-	}
-	if strings.HasPrefix(script, "list ") {
-		args = strings.Fields(strings.TrimSpace(script)) // read-only query
-		script = ""
 	}
 	cmd := exec.Command(bin, args...)
 	cmd.Stdin = strings.NewReader(script)
@@ -644,8 +720,7 @@ func descendants(procRoot string, roots []int) map[int]bool {
 
 // originFor finds where pid should return to: its own recorded origin, or
 // that of its nearest recorded ancestor (children born in quarantine).
-func originFor(procRoot string, pid int, origins map[int]string) (string, bool) {
-	pp := parents(procRoot)
+func originFor(pp map[int]int, pid int, origins map[int]string) (string, bool) {
 	for hops := 0; pid > 1 && hops < 64; hops++ {
 		if o, ok := origins[pid]; ok {
 			return o, true

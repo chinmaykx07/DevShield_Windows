@@ -485,6 +485,16 @@ func TestSightingLifecycle(t *testing.T) {
 	if err != nil || len(recs) != 1 || recs[0].SHA256 != "bbb" {
 		t.Fatalf("listAgents = %+v, %v", recs, err)
 	}
+
+	// An agent that is not running can still be resolved from the database.
+	w := &Watcher{cfg: Config{DB: db}}
+	gotFP, _, short, err := w.ResolveKnown(shortID(fp)[:6])
+	if err != nil || gotFP != fp || short != shortID(fp) {
+		t.Fatalf("ResolveKnown = %q %q %v", gotFP, short, err)
+	}
+	if _, _, _, err := w.ResolveKnown("ffffffff"); err == nil {
+		t.Fatal("unknown id resolved")
+	}
 }
 
 func TestRedactSecrets(t *testing.T) {
