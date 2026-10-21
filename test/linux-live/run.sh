@@ -109,7 +109,13 @@ check "another user (daemon) cannot read" "$(as daemon "$DS status" | grep -c 'n
 check "the owner cannot change policy" "$(as nobody "$DS sanction $ID" | grep -c 'requires root')" 1
 check "the attempt is logged with the program that tried" "$($DS events -n 20 | grep AGENT_TAMPER_ATTEMPT | grep -c 'sanction')" 1
 check "the audit log is root-only" "$(stat -c %a "$D/st/audit.log")" 600
-check "kernel exec events in use" "$($DS events -n 50 | grep -c EXEC_EVENTS_UNAVAILABLE)" 0
+# Kernel exec events (proc connector) exist only in the initial network
+# namespace, never in here: say so instead of passing timing checks that
+# a regular scan can satisfy by luck. Tested in the host namespace by
+# TestBlockedProgramIsCaughtAtExec.
+EXEC=yes
+$DS events -n 50 | grep -q EXEC_EVENTS_UNAVAILABLE && EXEC=no
+skip() { echo "  SKIP  $1: $2"; }
 
 echo "-- telemetry sinkhole on the real resolver (a private copy of /etc/hosts)"
 cp /etc/hosts "$D/hosts.orig"
@@ -161,7 +167,11 @@ check "unrelated process unaffected" "$(python3 -c 'import socket;socket.create_
 
 echo "-- restart is caught again"
 stopagent; startagent
-check "restart caught within ~2 s (kernel exec events, not the 10 s scan)" "$(waitfor 2 inq && echo yes)" yes
+if [ $EXEC = yes ]; then
+	check "restart caught within ~2 s (kernel exec events, not the 10 s scan)" "$(waitfor 2 inq && echo yes)" yes
+else
+	skip "restart caught within ~2 s" "no kernel exec events in a network namespace (see README)"
+fi
 check "re-quarantined after restart" "$(waitfor 30 inq && echo yes)" yes
 check "restarted agent cut off" "$(stopped 9001)" stopped
 
@@ -175,7 +185,11 @@ echo "-- block while not running; rules of closed sockets go away"
 stopagent
 $DS block "$ID" >/dev/null
 startagent
-check "caught within ~2 s of starting" "$(waitfor 2 inq && echo yes)" yes
+if [ $EXEC = yes ]; then
+	check "caught within ~2 s of starting" "$(waitfor 2 inq && echo yes)" yes
+else
+	skip "caught within ~2 s of starting" "no kernel exec events in a network namespace (see README)"
+fi
 check "caught when it starts" "$(waitfor 30 inq && echo yes)" yes
 check "cut off" "$(stopped 9001)" stopped
 stopagent
