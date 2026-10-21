@@ -1,9 +1,9 @@
 package thermal
 
 import (
-	"runtime"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
