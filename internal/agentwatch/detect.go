@@ -195,6 +195,7 @@ type ProcInfo struct {
 	Exe     string // full path, may be empty without permission
 	Cmdline string
 	User    string
+	Start   int64 // creation time (ms); with PID, identifies the process across PID reuse
 }
 
 // ProcBehavior holds the expensive, OS-specific observations about one
@@ -211,7 +212,11 @@ type Snapshot struct {
 	// ListenPorts maps PID → local TCP ports it listens on
 	ListenPorts map[int32][]int
 	// RemoteEndpoints maps PID → "ip:port" of established TCP connections
+	// (both directions)
 	RemoteEndpoints map[int32][]string
+	// Outbound is the subset of RemoteEndpoints this machine initiated
+	// (the local port is not a listening port, so it was not accepted)
+	Outbound map[int32][]string
 	// Behavior maps PID → extra observations (may be missing for a PID)
 	Behavior map[int32]*ProcBehavior
 	// Autostart maps a lower-case exe path → where it is registered to auto-start
@@ -227,6 +232,7 @@ type Detection struct {
 	Kind       string
 	Known      bool // identity matched the catalog (a label, not a verdict)
 	PID        int32
+	Start      int64 // process creation time (ms), see ProcInfo.Start
 	Exe        string
 	Cmdline    string
 	User       string
@@ -248,10 +254,17 @@ const RiskUndocumented = "undocumented agent — not in any catalog"
 // Match returns the first catalog signature that matches p, or nil.
 func (c *AgentCatalog) Match(p ProcInfo) *AgentSignature {
 	name := strings.ToLower(p.Name)
+	cmdline := p.Cmdline
+	if c.shells[name] {
+		// A shell's inline command is text it runs, not what it is:
+		// "bash -c 'cat claude-code-notes'" is not Claude Code. The real
+		// agent it launches is matched as its own process.
+		cmdline = shellIdentity(name, cmdline)
+	}
 	for i := range c.Agents {
 		a := &c.Agents[i]
 		for _, re := range a.cmdlineRe {
-			if p.Cmdline != "" && re.MatchString(p.Cmdline) {
+			if cmdline != "" && re.MatchString(cmdline) {
 				return a
 			}
 		}
@@ -296,7 +309,7 @@ func (c *AgentCatalog) Classify(s Snapshot, llmIPs map[string]string) []Detectio
 
 		target := launchTarget(p)
 		d := Detection{
-			PID: p.PID, Exe: p.Exe, Cmdline: p.Cmdline, User: p.User, Target: target,
+			PID: p.PID, Start: p.Start, Exe: p.Exe, Cmdline: p.Cmdline, User: p.User, Target: target,
 			AgentScore: score, Reasons: reasons,
 		}
 		if sig != nil {
@@ -538,6 +551,34 @@ func launchTarget(p ProcInfo) string {
 		}
 	}
 	return ""
+}
+
+// shellIdentity is the part of a shell's command line that says what the
+// shell is running: everything before an inline-command flag (-c, /c,
+// -Command, -EncodedCommand). A script path ("bash /opt/x/run.sh") is kept.
+func shellIdentity(shell, cmdline string) string {
+	args := splitCmdline(cmdline)
+	ps := strings.Contains(shell, "pwsh") || strings.Contains(shell, "powershell")
+	for i, a := range args {
+		if i == 0 {
+			continue
+		}
+		l := strings.ToLower(a)
+		inline := false
+		switch {
+		case l == "/c" || l == "/k" || l == "/r": // cmd.exe
+			inline = true
+		case ps && strings.HasPrefix(l, "-"):
+			o := strings.TrimLeft(l, "-")
+			inline = o == "c" || strings.HasPrefix(o, "command") || o == "e" || o == "ec" || strings.HasPrefix(o, "enc")
+		case !ps && len(l) > 1 && l[0] == '-' && l[1] != '-':
+			inline = strings.Contains(l[1:], "c") // -c, -lc, -ec …
+		}
+		if inline {
+			return strings.Join(args[:i], " ")
+		}
+	}
+	return cmdline
 }
 
 // splitCmdline splits a Windows-style command line on spaces, keeping

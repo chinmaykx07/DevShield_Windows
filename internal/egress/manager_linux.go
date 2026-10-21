@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/shirou/gopsutil/v3/process"
 )
 
 // Config for a Manager.
@@ -26,7 +28,18 @@ type Config struct {
 	Nft func(script string, check bool) error
 	// NftList prints DevShield's chain as the kernel has it. nil = nft.
 	NftList func() (string, error)
-	Emit    func(action, detail, status string)
+	// ProcStart returns a live (non-zombie) process's creation time as
+	// gopsutil reports it; ok=false if it is gone. nil = gopsutil.
+	ProcStart func(pid int) (start int64, ok bool)
+	Emit      func(action, detail, status string)
+}
+
+// Proc is a process to act on, as identified by Agent Watch. Start (its
+// creation time; 0 = unknown) is re-checked before anything is done, so a
+// PID reused since the scan is never touched.
+type Proc struct {
+	PID   int
+	Start int64
 }
 
 // Member is one agent DevShield placed in its quarantine or allowed group.
@@ -49,6 +62,7 @@ type Manager struct {
 	mu        sync.Mutex
 	cfg       Config
 	cgRoot    string // "" = no cgroup v2 (quarantine unavailable)
+	nftBase   string // where nft resolves cgroup paths (nftCgroupBase; tests change it)
 	st        state
 	pending   *time.Timer // lockdown awaiting confirmation
 	pendingBy time.Time
@@ -87,11 +101,14 @@ func New(cfg Config) (*Manager, error) {
 	if cfg.NftList == nil {
 		cfg.NftList = listNft
 	}
+	if cfg.ProcStart == nil {
+		cfg.ProcStart = procStart
+	}
 	if cfg.Emit == nil {
 		cfg.Emit = func(string, string, string) {}
 	}
 	m := &Manager{cfg: cfg, st: state{Blocked: map[string]*Member{}, Allowed: map[string]*Member{}}}
-	m.cgRoot = cfg.CgroupRoot
+	m.cgRoot, m.nftBase = cfg.CgroupRoot, nftCgroupBase
 	if m.cgRoot == "" {
 		m.cgRoot = findCgroup2(cfg.ProcRoot)
 	}
@@ -185,10 +202,10 @@ func (m *Manager) policy() Policy {
 	if m.cgRoot != "" {
 		if _, err := os.Stat(m.quarantineDir()); err == nil {
 			p.Quarantine = true
-			p.CgroupPath, _ = filepath.Rel(nftCgroupBase, m.quarantineDir())
+			p.CgroupPath, _ = filepath.Rel(m.nftBase, m.quarantineDir())
 		}
 		if _, err := os.Stat(m.groupDir(AllowedCgroup)); err == nil && p.Lockdown != nil {
-			p.AllowedPath, _ = filepath.Rel(nftCgroupBase, m.groupDir(AllowedCgroup))
+			p.AllowedPath, _ = filepath.Rel(m.nftBase, m.groupDir(AllowedCgroup))
 		}
 	}
 	fps := make([]string, 0, len(m.st.Blocked))
@@ -234,7 +251,7 @@ func (m *Manager) save() error {
 // Block cuts an agent (and everything it spawns) off the network, loopback
 // included, without affecting other programs. pids may be empty when the
 // agent is not running: it is then quarantined as soon as it appears.
-func (m *Manager) Block(fp, id, name string, pids []int) (moved, flows int, err error) {
+func (m *Manager) Block(fp, id, name string, pids []Proc) (moved, flows int, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.cgRoot == "" {
@@ -265,7 +282,7 @@ func (m *Manager) Block(fp, id, name string, pids []int) (moved, flows int, err 
 		}
 		return 0, 0, err
 	}
-	moved = m.capture(b, pids, QuarantineCgroup)
+	moved = m.capture(b, pids, QuarantineCgroup, true)
 	n := len(b.Flows)
 	m.refreshFlows(b)
 	if err := m.apply(); err != nil {
@@ -277,14 +294,20 @@ func (m *Manager) Block(fp, id, name string, pids []int) (moved, flows int, err 
 	return moved, len(b.Flows) - n, nil
 }
 
-// capture moves pids and all their descendants into group, recording
-// where each came from. It repeats until no new child appears, since a
-// process can fork while its parent is being moved.
-func (m *Manager) capture(b *Member, pids []int, group string) int {
+// capture moves pids into group, recording where each came from. With
+// descendants it also sweeps in every existing child, repeating until no
+// new one appears (a process can fork while its parent is being moved).
+// Blocking sweeps (cutting too much is the safe side); allowing does not,
+// since it grants a privilege: only the processes Agent Watch identified
+// get it, plus whatever they start later (children inherit the group).
+func (m *Manager) capture(b *Member, procs []Proc, group string, descend bool) int {
 	moved := 0
 	want := map[int]bool{}
-	for _, p := range pids {
-		want[p] = true
+	for _, p := range procs {
+		// The scan may be seconds old: only act on the very same process.
+		if start, ok := m.cfg.ProcStart(p.PID); ok && (p.Start == 0 || start == p.Start) {
+			want[p.PID] = true
+		}
 	}
 	for round := 0; round < 5 && len(want) > 0; round++ {
 		for pid := range want {
@@ -302,6 +325,9 @@ func (m *Manager) capture(b *Member, pids []int, group string) int {
 				b.Origins[pid] = cur
 			}
 			moved++
+		}
+		if !descend {
+			break
 		}
 		next := map[int]bool{}
 		for pid := range descendants(m.cfg.ProcRoot, keys(b.Origins)) {
@@ -366,7 +392,7 @@ func (m *Manager) release(set map[string]*Member, fp, group string) {
 // Allow lets an agent (and what it spawns) reach the network during a
 // lockdown. The caller decides whether the agent deserves it (DevShield's
 // daemon requires a sanctioned agent with a clean verdict).
-func (m *Manager) Allow(fp, id, name string, pids []int) (int, error) {
+func (m *Manager) Allow(fp, id, name string, pids []Proc) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.cgRoot == "" {
@@ -392,7 +418,7 @@ func (m *Manager) Allow(fp, id, name string, pids []int) (int, error) {
 		}
 		return 0, err
 	}
-	moved := m.capture(b, pids, AllowedCgroup)
+	moved := m.capture(b, pids, AllowedCgroup, false)
 	return moved, m.save()
 }
 
@@ -443,7 +469,7 @@ func (m *Manager) moveTo(pid int, origin string) {
 // Reconcile re-quarantines blocked agents whose processes (re)appeared
 // outside the group — e.g. the agent was restarted. running maps agent
 // fingerprint → current pids. It returns the ids that were re-captured.
-func (m *Manager) Reconcile(running map[string][]int) []string {
+func (m *Manager) Reconcile(running map[string][]Proc) []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.cgRoot == "" {
@@ -452,10 +478,10 @@ func (m *Manager) Reconcile(running map[string][]int) []string {
 	changed := m.tidy()
 	var caught []string
 	for fp, b := range m.st.Blocked {
-		var loose []int
-		for _, pid := range running[fp] {
-			if c := m.cgroupOf(pid); c != "" && c != "/"+QuarantineCgroup {
-				loose = append(loose, pid)
+		var loose []Proc
+		for _, p := range running[fp] {
+			if c := m.cgroupOf(p.PID); c != "" && c != "/"+QuarantineCgroup {
+				loose = append(loose, p)
 			}
 		}
 		if len(loose) == 0 {
@@ -464,19 +490,19 @@ func (m *Manager) Reconcile(running map[string][]int) []string {
 		if err := os.MkdirAll(m.quarantineDir(), 0o755); err != nil {
 			continue
 		}
-		if m.capture(b, loose, QuarantineCgroup) > 0 {
+		if m.capture(b, loose, QuarantineCgroup, true) > 0 {
 			m.refreshFlows(b)
 			caught = append(caught, b.ID)
 		}
 	}
 	for fp, b := range m.st.Allowed {
-		var loose []int
-		for _, pid := range running[fp] {
-			if c := m.cgroupOf(pid); c != "" && c != "/"+AllowedCgroup {
-				loose = append(loose, pid)
+		var loose []Proc
+		for _, p := range running[fp] {
+			if c := m.cgroupOf(p.PID); c != "" && c != "/"+AllowedCgroup {
+				loose = append(loose, p)
 			}
 		}
-		if len(loose) > 0 && os.MkdirAll(m.groupDir(AllowedCgroup), 0o755) == nil && m.capture(b, loose, AllowedCgroup) > 0 {
+		if len(loose) > 0 && os.MkdirAll(m.groupDir(AllowedCgroup), 0o755) == nil && m.capture(b, loose, AllowedCgroup, false) > 0 {
 			changed = true // a restarted allowed agent may go out again
 		}
 	}
@@ -670,6 +696,57 @@ func (m *Manager) LockdownOff() error {
 	return m.save()
 }
 
+// Reset undoes everything: releases blocked and allowed agents back to
+// their own groups, ends any lockdown and removes DevShield's table. It
+// reports what it undid.
+func (m *Manager) Reset() ([]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var did []string
+	if m.pending != nil {
+		m.pending.Stop()
+		m.pending = nil
+	}
+	if m.st.Lockdown != nil {
+		m.st.Lockdown = nil
+		did = append(did, "lockdown ended")
+	}
+	for fp, b := range m.st.Blocked {
+		m.release(m.st.Blocked, fp, QuarantineCgroup)
+		did = append(did, "unblocked "+b.ID)
+	}
+	for fp, b := range m.st.Allowed {
+		m.release(m.st.Allowed, fp, AllowedCgroup)
+		did = append(did, "disallowed "+b.ID)
+	}
+	// A group can outlive the state that explains it (crash, deleted state
+	// file, a process that could not be moved back). Its rule would keep
+	// cutting traffic, so try to remove it and say so if that fails.
+	var stuck []string
+	if m.cgRoot != "" {
+		for _, g := range []string{QuarantineCgroup, AllowedCgroup} {
+			if _, err := os.Stat(m.groupDir(g)); err != nil {
+				continue
+			}
+			if os.Remove(m.groupDir(g)) == nil {
+				did = append(did, "removed leftover group "+g)
+			} else {
+				stuck = append(stuck, fmt.Sprintf("%s still holds %d process(es)", g, len(m.members(g))))
+			}
+		}
+	}
+	if err := m.apply(); err != nil {
+		return did, err
+	}
+	if err := m.save(); err != nil {
+		return did, err
+	}
+	if len(stuck) > 0 {
+		return did, fmt.Errorf("%s; their rule stays loaded (fail closed) — end or move those processes and run again", strings.Join(stuck, "; "))
+	}
+	return did, nil
+}
+
 // ── Health ──
 
 // Status reports the saved policy and whether the kernel still has it.
@@ -756,6 +833,20 @@ func (m *Manager) EnsureLoaded() (bool, error) {
 }
 
 // ── helpers ──
+
+// procStart reads a process's creation time the same way Agent Watch
+// does (gopsutil), so the two compare exactly. Zombies count as gone.
+func procStart(pid int) (int64, bool) {
+	p, err := process.NewProcess(int32(pid))
+	if err != nil {
+		return 0, false
+	}
+	if st, err := p.Status(); err == nil && len(st) > 0 && st[0] == process.Zombie {
+		return 0, false
+	}
+	ct, err := p.CreateTime()
+	return ct, err == nil
+}
 
 func nftBinary() string {
 	for _, p := range []string{"/usr/sbin/nft", "/sbin/nft", "/usr/bin/nft"} {

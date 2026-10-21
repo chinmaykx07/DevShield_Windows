@@ -20,6 +20,8 @@ import (
 
 	"github.com/chinmaykx07/DevShield_Windows/internal/auditlog"
 	"github.com/chinmaykx07/DevShield_Windows/internal/egress"
+	"github.com/chinmaykx07/DevShield_Windows/internal/lanprivacy"
+	"github.com/chinmaykx07/DevShield_Windows/internal/netwatch"
 )
 
 // DefaultSocket is where the Linux daemon listens.
@@ -120,6 +122,22 @@ type Response struct {
 	Thermal  *Thermal          `json:"thermal,omitempty"`
 	Sinkhole *Sinkhole         `json:"sinkhole,omitempty"`
 	Egress   *egress.Status    `json:"egress,omitempty"`
+	LAN      *LANPrivacy       `json:"lan_privacy,omitempty"`
+	Net      []netwatch.Entry  `json:"net,omitempty"`
+	Restore  []RestoreStep     `json:"restore,omitempty"`
+}
+
+// RestoreStep is one part of undoing DevShield's changes.
+type RestoreStep struct {
+	What   string `json:"what"`
+	OK     bool   `json:"ok"`
+	Detail string `json:"detail,omitempty"`
+}
+
+// LANPrivacy is the local-network privacy state, and what a change did.
+type LANPrivacy struct {
+	lanprivacy.Status
+	Result *lanprivacy.Result `json:"result,omitempty"`
 }
 
 // Peer identifies the process on the other end, as reported by the kernel.

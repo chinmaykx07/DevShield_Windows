@@ -57,13 +57,11 @@ func (d *Daemon) startEgress() {
 // suspends the network allowance of any allowed agent that no longer
 // deserves it (sanction revoked, binary replaced, or rogue behaviour).
 func (d *Daemon) reconcileEgress() {
-	running := map[string][]int{}
+	running := map[string][]egress.Proc{}
 	verdict := map[string]string{}
 	for _, a := range d.watcher.Running() {
 		verdict[a.Fingerprint] = a.Verdict
-		for _, p := range a.PIDs {
-			running[a.Fingerprint] = append(running[a.Fingerprint], int(p))
-		}
+		running[a.Fingerprint] = procsOf(a)
 	}
 	for _, fp := range d.egress.AllowedFingerprints() {
 		why := ""
@@ -82,6 +80,15 @@ func (d *Daemon) reconcileEgress() {
 	for _, id := range d.egress.Reconcile(running) {
 		d.event("AGENT_REQUARANTINED", "blocked agent "+id+" came back (restarted or new process) and was cut off again", "warn")
 	}
+}
+
+// procsOf converts Agent Watch's process list for the egress manager.
+func procsOf(a agentwatch.RunningAgent) []egress.Proc {
+	out := make([]egress.Proc, 0, len(a.Procs))
+	for _, p := range a.Procs {
+		out = append(out, egress.Proc{PID: int(p.PID), Start: p.Start})
+	}
+	return out
 }
 
 // setAllow lets a sanctioned, well-behaved agent out during a lockdown.
@@ -104,7 +111,7 @@ func (d *Daemon) setAllow(op, id string, peer ipc.Peer) ipc.Response {
 	if err != nil {
 		return ipc.Response{Error: err.Error()}
 	}
-	var pids []int
+	var pids []egress.Proc
 	for _, a := range d.watcher.Running() {
 		if a.Fingerprint != fp {
 			continue
@@ -112,9 +119,7 @@ func (d *Daemon) setAllow(op, id string, peer ipc.Peer) ipc.Response {
 		if a.Verdict != agentwatch.VerdictSanctioned {
 			return ipc.Response{Error: fmt.Sprintf("%s is %s: only a sanctioned agent with no risk signs can be allowed (sudo devshield sanction %s first)", short, a.Verdict, short)}
 		}
-		for _, p := range a.PIDs {
-			pids = append(pids, int(p))
-		}
+		pids = procsOf(a)
 	}
 	if pids == nil && d.watcher.StoredStatus(fp) != agentwatch.AgentSanctioned {
 		return ipc.Response{Error: fmt.Sprintf("%s is not sanctioned: sudo devshield sanction %s first", short, short)}
@@ -159,12 +164,10 @@ func (d *Daemon) setBlock(op, id string, peer ipc.Peer) ipc.Response {
 	if err != nil {
 		return ipc.Response{Error: err.Error()}
 	}
-	var pids []int
+	var pids []egress.Proc
 	for _, a := range d.watcher.Running() {
 		if a.Fingerprint == fp {
-			for _, p := range a.PIDs {
-				pids = append(pids, int(p))
-			}
+			pids = procsOf(a)
 		}
 	}
 	moved, flows, err := d.egress.Block(fp, short, name, pids)

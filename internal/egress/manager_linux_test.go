@@ -117,7 +117,7 @@ func TestRejectedRulesetChangesNothing(t *testing.T) {
 
 func TestBlockNeedsCgroup2(t *testing.T) {
 	m := newTestManager(t, &fakeNft{}, t.TempDir())
-	if _, _, err := m.Block("fp", "abcd1234", "x", []int{1}); err == nil || !strings.Contains(err.Error(), "cgroup v2") {
+	if _, _, err := m.Block("fp", "abcd1234", "x", []Proc{{PID: 1}}); err == nil || !strings.Contains(err.Error(), "cgroup v2") {
 		t.Fatalf("got %v", err)
 	}
 }
@@ -209,5 +209,45 @@ func TestFindCgroup2AndDescendants(t *testing.T) {
 	}
 	if o, ok := originFor(parents(proc), 102, map[int]string{100: "/user.slice"}); !ok || o != "/user.slice" {
 		t.Fatalf("origin = %q %v", o, ok)
+	}
+}
+
+// Agent Watch's process list can be seconds old. A PID that exited and was
+// reused by another program must not be quarantined or allowed (found live:
+// a block right after the agent stopped acted on its zombie).
+func TestStalePIDIsNeverMoved(t *testing.T) {
+	proc, cg := t.TempDir(), t.TempDir()
+	os.MkdirAll(filepath.Join(proc, "4242"), 0o755)
+	os.WriteFile(filepath.Join(proc, "4242", "cgroup"), []byte("0::/user.slice\n"), 0o644)
+	os.WriteFile(filepath.Join(proc, "4242", "stat"), []byte("4242 (python3) S 1 ..."), 0o644)
+	nft := &fakeNft{}
+	m, err := New(Config{StateDir: t.TempDir(), ProcRoot: proc, CgroupRoot: cg, Nft: nft.run, NftList: nft.list,
+		ProcStart: func(pid int) (int64, bool) { return 2000, pid == 4242 }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.nftBase = cg
+	moved, _, err := m.Block("fp", "abcd1234", "x", []Proc{{PID: 4242, Start: 1000}}) // scan saw an older process
+	if err != nil || moved != 0 {
+		t.Fatalf("stale PID moved: moved=%d err=%v", moved, err)
+	}
+	if data, _ := os.ReadFile(filepath.Join(cg, QuarantineCgroup, "cgroup.procs")); len(data) != 0 {
+		t.Fatalf("wrote %q to the quarantine group", data)
+	}
+	if moved, _, _ := m.Block("fp", "abcd1234", "x", []Proc{{PID: 4242, Start: 2000}}); moved != 1 {
+		t.Fatalf("same process not moved: %d", moved)
+	}
+	if moved, _ := m.Allow("fp2", "ef", "y", []Proc{{PID: 4243, Start: 2000}}); moved != 0 {
+		t.Fatalf("exited PID allowed: %d", moved)
+	}
+}
+
+func TestResetUndoesEverything(t *testing.T) {
+	nft, dir := &fakeNft{}, t.TempDir()
+	m := newTestManager(t, nft, dir)
+	m.LockdownOn(wg0, time.Minute) // pending, too
+	did, err := m.Reset()
+	if err != nil || len(did) != 1 || strings.Contains(nft.last(), "chain egress") || !m.Status().ConfirmBy.IsZero() {
+		t.Fatalf("reset: %v %v\n%s", did, err, nft.last())
 	}
 }

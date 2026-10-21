@@ -58,6 +58,23 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   Tested live in
   network namespaces (unified and hybrid cgroups); not yet with a real
   VPN/Tor setup or under systemd.
+- Linux LAN privacy (`sudo devshield lan-privacy on|off`): LLMNR and mDNS
+  off (systemd-resolved, NetworkManager), a random Wi-Fi MAC per network
+  and while scanning, and IPv6 privacy addresses. Only DevShield's own
+  drop-in files are written, so `off` is an exact undo. Status reports the
+  effective state and warns about Avahi and nmbd. Tested on a simulated
+  system tree; not yet with real resolved, NetworkManager or Wi-Fi.
+- Linux network monitor (`devshield net`): outbound TCP connections per
+  program, labelled telemetry / LLM API / LAN / other from the data Agent
+  Watch already collects, with no second scan. Each program+telemetry-host
+  pair is logged once a day (`NET_TELEMETRY`). Inbound connections are not
+  reported as outbound.
+- `sudo devshield restore-all`: undoes every system change DevShield made
+  (network rules and groups, thermal, sinkhole, LAN privacy including the
+  live IPv6 value), reporting each step. Approvals and the log are kept.
+  Verified on a simulated tree: every value back to the original.
+- `test/linux-live/run.sh`: repeatable live tests of the network controls
+  against the real kernel, nftables and daemon, inside namespaces.
 - Tamper-evident, hash-chained audit log: edits, deletions, reordering and
   truncation are detected; unclean daemon stops are reported.
 
@@ -70,6 +87,18 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   35 to 0. CI now runs vet, race tests and govulncheck on Linux and Windows.
 
 ### Fixed
+- `lan-privacy off` left the live IPv6 privacy setting changed until
+  reboot. The original value is now recorded (in DevShield's own drop-in,
+  kept across repeated `on`) and written back.
+- Agent Watch identified a shell as an agent when its inline command
+  (`bash -c "…"`) merely mentioned the agent. Inline commands of shells
+  are no longer matched against catalog patterns; script files still are.
+- Network block/allow could act on a PID from a scan up to 10 s old: a
+  zombie, or a PID reused by another program. Each process is now
+  re-checked (same PID and start time, not a zombie) before it is moved.
+- `allow` swept in the agent's pre-existing child processes, granting
+  network access to programs that were never identified as the agent. It
+  now allows only identified processes (and what they start later).
 - systemd unit: `ProtectSystem=strict` left `/etc/hosts` read-only, so the
   sinkhole could not have worked under systemd. It is now the one
   `ReadWritePaths` entry. `ProtectControlGroups` is dropped (quarantine

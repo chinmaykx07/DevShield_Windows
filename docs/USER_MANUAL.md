@@ -170,6 +170,33 @@ The list is deliberately small and documented, so every entry is a pure telemetr
 - **Your entries are safe.** Your own lines in `/etc/hosts` are never touched, and `off` removes only DevShield's block, keeping edits you made since. A one-time copy of the original file is kept in the root-only state directory.
 - **Status warns you** if the sinkhole can't work: name resolution that ignores `/etc/hosts`, or entries removed by hand. Browsers using DNS-over-HTTPS bypass hosts-file blocking.
 
+**Network monitor (Linux)**: which program is talking to whom.
+
+```bash
+devshield net          # outbound connections: 📡 telemetry, 🤖 LLM APIs, 🌐 other (exit 3 if telemetry)
+devshield net --all    # also local network and this machine
+```
+
+- It reuses the data Agent Watch already collects every 10 seconds, so it adds no scanning of its own.
+- Telemetry is recognised by the sinkhole's list of telemetry domains, resolved to addresses every 30 minutes while the sinkhole is off (when it's on, those names can't be reached by name anyway). Each program that sends to one is logged once a day as `NET_TELEMETRY`.
+- Only connections this machine *started* are shown. Connections other machines open *to* it (for example SSH) are left out.
+- Labels come from IP addresses. Big providers share addresses, so a label means "likely", not proof. TCP only for now.
+
+**Local-network privacy (Linux)**: what your machine reveals to everyone on the same Wi-Fi.
+
+```bash
+devshield lan-privacy              # what leaks right now (exit code 3 if something does)
+sudo devshield lan-privacy on      # stop it
+sudo devshield lan-privacy off     # undo: removes only DevShield's own files
+```
+
+- **LLMNR and mDNS off.** These answer "who is <name>?" on the local network. They reveal your hostname, and LLMNR answers are a classic way for an attacker on the same network to steal login hashes. DevShield configures systemd-resolved and NetworkManager.
+- **A random Wi-Fi MAC address per network.** Each network sees a different address; it stays stable for that network so logins and captive portals keep working. Wi-Fi scans also use random addresses, so shops and stations can't track the device from scan to scan. The new address is used from the next connection.
+- **IPv6 privacy addresses**, so your IPv6 address doesn't identify the device across the internet.
+- Status shows the **effective** state as the system reports it, not what DevShield wrote. Anything it can't confirm shows as ❔, never as safe.
+- It also **warns** about services that announce the machine and that DevShield won't silently stop, because you may need them: Avahi (mDNS, used for network printer discovery) and Samba's nmbd (NetBIOS).
+- Only components that are installed are configured. Without NetworkManager, set MAC randomisation in your own network tool.
+
 **Network controls (Linux): block one agent, or lock the whole machine down**
 
 DevShield writes its rules into its own nftables table (`inet devshield`) and never touches other tables. The rules live in the kernel, so they **keep working if DevShield stops** (fail closed). Every 10 seconds the daemon compares the kernel's rules with what they should be. If another tool removed or changed them (for example a firewall service running `flush ruleset`, or a single rule deleted), it puts them back and logs `EGRESS_RULES_RESTORED`. At boot, `devshield-egress.service` loads the saved rules **before the network starts**, so a lockdown has no unprotected window. Needs the `nft` tool (package `nftables`).
@@ -202,7 +229,8 @@ sudo devshield disallow 6120139f
 - The allowance is **withdrawn automatically** (`AGENT_ALLOW_SUSPENDED`) the moment that stops being true: the sanction is revoked, the program file is replaced, or Agent Watch sees rogue behaviour.
 - A restarted allowed agent is allowed again at the next scan. Blocking always wins over allowing.
 - Outside a lockdown, allowing changes nothing, because everything may go out anyway.
-- Allowed and blocked agents are identified the way Agent Watch identifies them. That includes processes whose command line matches a catalog pattern, together with their children, so keep custom catalog patterns specific.
+- Allowing is narrow on purpose: only the processes Agent Watch identifies as the agent are allowed, plus whatever they start afterwards. Programs the agent started *before* you allowed it stay blocked. (Blocking is broad: it takes the agent's existing children too.)
+- DevShield checks each process is still the same one before acting on it (same PID *and* same start time), so a process ID reused by another program after a scan is never blocked or allowed by mistake.
 
 *Lockdown: nothing leaves except the way you choose.* This is the alternative to a Tor-only kill switch, for networks that block Tor:
 
@@ -238,6 +266,14 @@ sudo devshield lockdown off
 - **Old-style cgroup v1 network controllers** (net_cls/net_prio) in use on a hybrid system disable the per-agent match. This is rare on modern distributions.
 - **Allowing arbitrary programs (a browser, a game)** and **ask-before-connect prompts** (like simplewall or OpenSnitch) are not built yet; today you allow agents, tunnels and users. See the roadmap.
 
+**Undo everything (Linux):**
+
+```bash
+sudo devshield restore-all
+```
+
+This undoes every system change DevShield made: it ends any lockdown, unblocks and disallows agents, and restores the original thermal settings, `/etc/hosts`, the LAN-privacy files and the live IPv6 setting. Each step is reported as ✅ or ❌, and a failed step doesn't stop the others. Your agent approvals and the audit log are kept, because they are your decisions and your record, not system changes. If a process can't be moved out of the quarantine group, `restore-all` says so and leaves its rule loaded (fail closed) instead of claiming success.
+
 **Install, by hand for now** (packages come later):
 
 ```bash
@@ -249,7 +285,7 @@ sudo systemctl daemon-reload && sudo systemctl enable --now devshield
 sudo systemctl enable devshield-egress   # network rules at boot, before the network starts
 ```
 
-Status: tested by unit tests and a live run with real users on Linux (owner/other user, a rogue attempting self-sanction, `kill -9`, log tampering). **Not yet tested under systemd itself**, so the unit's hardening settings still need a real-machine check. The sinkhole was tested live on a real Linux system: the resolver returned 0.0.0.0 for blocked domains, update servers kept resolving, and `/etc/hosts` came back byte-for-byte identical after `off`. Sensors and thermal profiles are tested on simulated kernel layouts (Intel/AMD, laptop and desktop) and through the real daemon socket, but **not yet on real hardware**. Network controls were tested live through the real daemon, kernel and nft, in an isolated network namespace with both unified and hybrid cgroup layouts. The tests covered: blocking a running agent and its child (held and new connections stopped, other programs unaffected), re-blocking after a restart, unblocking, lockdown via a tunnel interface, an endpoint or an allowed user, the auto-revert, restoring a deleted table, keeping lockdown across a daemon restart, blocking an agent before it starts, removing rules for closed sockets, detecting one deleted rule inside the table, and `egress-restore` with no daemon running; allowing a sanctioned agent out of an allowed-only lockdown (other programs stayed blocked), automatic withdrawal on revoke, re-allow after restart, and block overriding allow. They were **not yet** run with a real WireGuard/Tor setup, or under systemd. The Linux tray comes next.
+Status: tested by unit tests and a live run with real users on Linux (owner/other user, a rogue attempting self-sanction, `kill -9`, log tampering). **Not yet tested under systemd itself**, so the unit's hardening settings still need a real-machine check. The sinkhole was tested live on a real Linux system: the resolver returned 0.0.0.0 for blocked domains, update servers kept resolving, and `/etc/hosts` came back byte-for-byte identical after `off`. Sensors and thermal profiles are tested on simulated kernel layouts (Intel/AMD, laptop and desktop) and through the real daemon socket, but **not yet on real hardware**. The network monitor was tested live in a namespace: a real connection to an address standing in for a telemetry domain was labelled and logged once, and the server side of the same connection was correctly left out. LAN privacy was tested through the real daemon on a simulated system tree. It was **not yet** tested with real systemd-resolved, NetworkManager or Wi-Fi hardware. Network controls are tested live by `test/linux-live/run.sh` (see its README), through the real daemon, kernel and nft, in an isolated network namespace with both unified and hybrid cgroup layouts. The tests covered: blocking a running agent and its child (held and new connections stopped, other programs unaffected), re-blocking after a restart, unblocking, lockdown via a tunnel interface, an endpoint or an allowed user, the auto-revert, restoring a deleted table, keeping lockdown across a daemon restart, blocking an agent before it starts, removing rules for closed sockets, detecting one deleted rule inside the table, and `egress-restore` with no daemon running; allowing a sanctioned agent out of an allowed-only lockdown (other programs stayed blocked), automatic withdrawal on revoke, re-allow after restart, and block overriding allow. They were **not yet** run with a real WireGuard/Tor setup, or under systemd. The Linux tray comes next.
 
 ## 3. Pro Use
 

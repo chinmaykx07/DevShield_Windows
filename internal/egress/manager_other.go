@@ -16,6 +16,7 @@ type Config struct {
 	CgroupRoot string
 	Nft        func(script string, check bool) error
 	NftList    func() (string, error)
+	ProcStart  func(pid int) (int64, bool)
 	Emit       func(action, detail, status string)
 }
 
@@ -39,22 +40,29 @@ type BlockInfo struct {
 	Flows int       `json:"flows_cut"`
 }
 
+// Proc is a process to act on, as identified by Agent Watch.
+type Proc struct {
+	PID   int
+	Start int64
+}
+
 // Manager is a stub outside Linux.
 type Manager struct{}
 
-func New(Config) (*Manager, error)                                     { return nil, errUnsupported }
-func (*Manager) Block(string, string, string, []int) (int, int, error) { return 0, 0, errUnsupported }
-func (*Manager) Unblock(string) error                                  { return errUnsupported }
-func (*Manager) Reconcile(map[string][]int) []string                   { return nil }
-func (*Manager) IsBlocked(string) bool                                 { return false }
-func (*Manager) ResolveBlocked(string) (string, bool)                  { return "", false }
-func (*Manager) Allow(string, string, string, []int) (int, error)      { return 0, errUnsupported }
-func (*Manager) Disallow(string) error                                 { return errUnsupported }
-func (*Manager) IsAllowed(string) bool                                 { return false }
-func (*Manager) AllowedFingerprints() []string                         { return nil }
-func (*Manager) ResolveAllowed(string) (string, bool)                  { return "", false }
-func (*Manager) LockdownOn(Lockdown, time.Duration) error              { return errUnsupported }
-func (*Manager) Confirm() error                                        { return errUnsupported }
-func (*Manager) LockdownOff() error                                    { return errUnsupported }
-func (*Manager) Status() Status                                        { return Status{} }
-func (*Manager) EnsureLoaded() (bool, error)                           { return false, errUnsupported }
+func New(Config) (*Manager, error)                                      { return nil, errUnsupported }
+func (*Manager) Block(string, string, string, []Proc) (int, int, error) { return 0, 0, errUnsupported }
+func (*Manager) Unblock(string) error                                   { return errUnsupported }
+func (*Manager) Reconcile(map[string][]Proc) []string                   { return nil }
+func (*Manager) IsBlocked(string) bool                                  { return false }
+func (*Manager) ResolveBlocked(string) (string, bool)                   { return "", false }
+func (*Manager) Allow(string, string, string, []Proc) (int, error)      { return 0, errUnsupported }
+func (*Manager) Disallow(string) error                                  { return errUnsupported }
+func (*Manager) IsAllowed(string) bool                                  { return false }
+func (*Manager) AllowedFingerprints() []string                          { return nil }
+func (*Manager) ResolveAllowed(string) (string, bool)                   { return "", false }
+func (*Manager) LockdownOn(Lockdown, time.Duration) error               { return errUnsupported }
+func (*Manager) Confirm() error                                         { return errUnsupported }
+func (*Manager) LockdownOff() error                                     { return errUnsupported }
+func (*Manager) Status() Status                                         { return Status{} }
+func (*Manager) Reset() ([]string, error)                               { return nil, errUnsupported }
+func (*Manager) EnsureLoaded() (bool, error)                            { return false, errUnsupported }

@@ -34,9 +34,13 @@ UMask=0077
 CapabilityBoundingSet=CAP_SYS_PTRACE CAP_DAC_READ_SEARCH CAP_NET_ADMIN
 NoNewPrivileges=yes
 ProtectSystem=strict
-# The one file outside the state directory DevShield edits (the telemetry
-# sinkhole's managed block); everything else under /etc stays read-only.
-ReadWritePaths=/etc/hosts
+# The only places outside the state directory DevShield writes: the
+# telemetry sinkhole's managed block in /etc/hosts, and its own drop-in
+# files for LAN privacy. Everything else under /etc stays read-only. The
+# drop-in directories are created first (with full privileges, "+") so they
+# can be bind-mounted writable; "-" skips NetworkManager's if it is absent.
+ExecStartPre=+/bin/mkdir -p /etc/systemd/resolved.conf.d /etc/sysctl.d
+ReadWritePaths=/etc/hosts /etc/systemd/resolved.conf.d /etc/sysctl.d -/etc/NetworkManager/conf.d
 ProtectHome=read-only
 # No PrivateTmp: rogue agents often live in /tmp, and the daemon must see
 # (and hash) the real files there.

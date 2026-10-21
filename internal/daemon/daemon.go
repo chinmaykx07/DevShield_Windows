@@ -7,10 +7,12 @@
 // daemon who is calling; the rules are:
 //
 //	read  (status, agents, events, verify,  root or a configured owner uid
-//	       thermal, privacy, egress)
+//	       thermal, privacy, egress, net,
+//	       lan-privacy)
 //	write (sanction, revoke, profile,       root only — i.e. the owner via sudo
 //	       sinkhole, block, unblock,
-//	       lockdown, allow, disallow)
+//	       lockdown, allow, disallow,
+//	       set-lan-privacy, restore-all)
 //
 // A non-root process trying to change policy is recorded as
 // AGENT_TAMPER_ATTEMPT, naming the program that tried.
@@ -33,6 +35,8 @@ import (
 	"github.com/chinmaykx07/DevShield_Windows/internal/egress"
 	"github.com/chinmaykx07/DevShield_Windows/internal/hosts"
 	"github.com/chinmaykx07/DevShield_Windows/internal/ipc"
+	"github.com/chinmaykx07/DevShield_Windows/internal/lanprivacy"
+	"github.com/chinmaykx07/DevShield_Windows/internal/netwatch"
 	"github.com/chinmaykx07/DevShield_Windows/internal/sensors"
 	"github.com/chinmaykx07/DevShield_Windows/internal/thermal"
 
@@ -57,9 +61,9 @@ type Config struct {
 	HostListOverride string // optional root-owned sinkhole list
 }
 
-var readOps = map[string]bool{"status": true, "agents": true, "events": true, "verify": true, "thermal": true, "privacy": true, "egress": true}
+var readOps = map[string]bool{"status": true, "agents": true, "events": true, "verify": true, "thermal": true, "privacy": true, "egress": true, "lan-privacy": true, "net": true}
 var writeOps = map[string]bool{"sanction": true, "revoke": true, "profile": true, "sinkhole": true,
-	"block": true, "unblock": true, "lockdown": true, "allow": true, "disallow": true}
+	"block": true, "unblock": true, "lockdown": true, "allow": true, "disallow": true, "set-lan-privacy": true, "restore-all": true}
 
 // authorize decides whether peer may run op. tamper is true when a
 // non-root process attempted a policy change — worth an alert of its own.
@@ -84,6 +88,8 @@ type Daemon struct {
 	db      *sql.DB
 	watcher *agentwatch.Watcher
 	egress  *egress.Manager // nil when unavailable
+	netRes  *netwatch.Resolver
+	netSeen *netwatch.Dedupe
 	stop    chan struct{}
 	started time.Time
 	tamper  bool
@@ -191,6 +197,7 @@ func start(cfg Config) (*Daemon, error) {
 	d.watcher = w
 	w.Start()
 	d.startEgress()
+	d.startNetwatch()
 
 	d.event("DAEMON_STARTED", fmt.Sprintf("version %s, owners %v, uid %d", cfg.Version, cfg.Owners, os.Geteuid()), "ok")
 	return d, nil
@@ -308,6 +315,14 @@ func (d *Daemon) handle(peer ipc.Peer, req ipc.Request) ipc.Response {
 		return d.setLockdown(req.Profile, req.Lockdown, peer)
 	case "allow", "disallow":
 		return d.setAllow(req.Op, req.ID, peer)
+	case "restore-all":
+		return d.restoreAll(peer)
+	case "net":
+		return ipc.Response{OK: true, Net: d.netEntries()}
+	case "lan-privacy":
+		return ipc.Response{OK: true, LAN: &ipc.LANPrivacy{Status: d.lanSystem().Check()}}
+	case "set-lan-privacy":
+		return d.setLANPrivacy(req.Profile, peer)
 	}
 	return ipc.Response{Error: "unknown operation"}
 }
@@ -422,6 +437,30 @@ func ParseOwners(spec string, lookup func(string) (int, error)) ([]int, error) {
 		out = append(out, uid)
 	}
 	return out, nil
+}
+
+func (d *Daemon) lanSystem() lanprivacy.System {
+	return lanprivacy.System{Root: d.cfg.SysRoot, Run: lanprivacy.ExecRunner}
+}
+
+func (d *Daemon) setLANPrivacy(mode string, peer ipc.Peer) ipc.Response {
+	s := d.lanSystem()
+	var r lanprivacy.Result
+	var err error
+	switch mode {
+	case "on":
+		r, err = s.Apply()
+	case "off":
+		r, err = s.Off()
+	default:
+		return ipc.Response{Error: "lan-privacy takes on or off"}
+	}
+	if err != nil {
+		d.event("LAN_PRIVACY_FAILED", fmt.Sprintf("%s: %v (by %s)", mode, err, peer), "fail")
+		return ipc.Response{Error: err.Error()}
+	}
+	d.event("LAN_PRIVACY_"+strings.ToUpper(mode), fmt.Sprintf("%s (by %s)", strings.Join(r.Changed, "; "), peer), "ok")
+	return ipc.Response{OK: true, LAN: &ipc.LANPrivacy{Status: s.Check(), Result: &r}}
 }
 
 func (d *Daemon) sinkholeStatus() ipc.Response {

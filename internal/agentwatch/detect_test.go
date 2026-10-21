@@ -516,3 +516,29 @@ func TestBrokenCatalogRegexIsReported(t *testing.T) {
 		t.Fatal("invalid regex should be reported")
 	}
 }
+
+// A shell whose inline command merely mentions an agent is not that agent
+// (found live: a test harness's own shell was identified as the agent).
+func TestShellInlineCommandIsNotTheAgent(t *testing.T) {
+	cat, err := ParseAgentCatalog([]byte(`{"agents":[{"name":"Test","cmdline_patterns":["fake-rogue-agent"]}],
+		"shell_names":["bash","cmd.exe","pwsh"]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, cmdline string
+		want          bool
+	}{
+		{"bash", `bash -c "python3 agent.py fake-rogue-agent"`, false},
+		{"bash", `bash -lc "fake-rogue-agent --run"`, false},
+		{"cmd.exe", `cmd.exe /c fake-rogue-agent.exe`, false},
+		{"pwsh", `pwsh -NoProfile -Command "fake-rogue-agent"`, false},
+		{"bash", `bash /opt/fake-rogue-agent/run.sh`, true},    // a script file is what the shell IS
+		{"python3", `python3 agent.py fake-rogue-agent`, true}, // the real agent process
+	} {
+		got := cat.Match(ProcInfo{Name: tc.name, Cmdline: tc.cmdline}) != nil
+		if got != tc.want {
+			t.Errorf("%s %q matched=%v, want %v", tc.name, tc.cmdline, got, tc.want)
+		}
+	}
+}

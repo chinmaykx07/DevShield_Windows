@@ -6,12 +6,11 @@ name: Build and Release
 
 on:
   push:
+    branches:
+      - main
     tags:
       - 'v*'
   pull_request:
-    branches:
-      - main
-  push:
     branches:
       - main
 
@@ -45,6 +44,25 @@ jobs:
         run: go test -race -count=1 ./...
       - name: govulncheck (fails on reachable vulnerabilities)
         run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+  # ── Live Linux network-control tests (real kernel + nftables, in namespaces) ──
+  # Non-blocking until it has been seen green on GitHub's runners.
+  live-linux:
+    name: Live network-control tests (Linux)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install nftables
+        run: sudo apt-get update && sudo apt-get install -y nftables
+      - name: Build
+        run: go build -o devshield .
+      - name: Run live tests
+        run: sudo test/linux-live/run.sh ./devshield
 
   build:
     needs: verify

@@ -59,7 +59,14 @@ type RunningAgent struct {
 	Verdict     string // sanctioned | unsanctioned | risky | rogue
 	ActiveRisks []string
 	Processes   int
-	PIDs        []int32 // every process of this agent seen in the last scan
+	Procs       []ProcRef // every process of this agent seen in the last scan
+}
+
+// ProcRef identifies one process: PID plus creation time, so a PID that
+// was reused by another program after the scan is never mistaken for it.
+type ProcRef struct {
+	PID   int32
+	Start int64 // ms since the epoch, as gopsutil's CreateTime reports it
 }
 
 type cachedProc struct {
@@ -100,6 +107,7 @@ type Watcher struct {
 	callbacks []func()
 
 	llmIPs      map[string]string // ip → LLM API host
+	conns       []Conn            // every established TCP connection, last scan
 	resolvedAt  time.Time
 	autostart   map[string]string
 	autostartAt time.Time
@@ -232,6 +240,7 @@ func (w *Watcher) scan() {
 	w.mu.RUnlock()
 
 	running := mergeDetections(cat.Classify(snap, llmIPs))
+	w.keepConnections(snap)
 	db := w.cfg.DB
 	now := nowISO()
 
@@ -343,12 +352,12 @@ func mergeDetections(dets []Detection) []RunningAgent {
 			byFP[fp] = len(out)
 			d.Reasons = append([]string(nil), d.Reasons...)
 			d.Risks = append([]string(nil), d.Risks...)
-			out = append(out, RunningAgent{Detection: d, Fingerprint: fp, ID: shortID(fp), Processes: 1, PIDs: []int32{d.PID}})
+			out = append(out, RunningAgent{Detection: d, Fingerprint: fp, ID: shortID(fp), Processes: 1, Procs: []ProcRef{{d.PID, d.Start}}})
 			continue
 		}
 		a := &out[i]
 		a.Processes++
-		a.PIDs = append(a.PIDs, d.PID)
+		a.Procs = append(a.Procs, ProcRef{d.PID, d.Start})
 		if d.AgentScore > a.AgentScore {
 			a.AgentScore = d.AgentScore
 		}
@@ -446,6 +455,7 @@ func (w *Watcher) collect(cat *AgentCatalog) (Snapshot, error) {
 	snap := Snapshot{
 		ListenPorts:     map[int32][]int{},
 		RemoteEndpoints: map[int32][]string{},
+		Outbound:        map[int32][]string{},
 		Behavior:        map[int32]*ProcBehavior{},
 		Autostart:       autostart,
 	}
@@ -463,7 +473,7 @@ func (w *Watcher) collect(cat *AgentCatalog) (Snapshot, error) {
 		// once per process lifetime (PID + create time).
 		c, ok := w.procCache[p.Pid]
 		if !ok || c.createTime != ct {
-			c = cachedProc{createTime: ct, info: ProcInfo{PID: p.Pid}}
+			c = cachedProc{createTime: ct, info: ProcInfo{PID: p.Pid, Start: ct}}
 			c.info.Name, _ = p.Name()
 			c.info.PPID, _ = p.Ppid()
 			c.info.Exe, _ = p.Exe()
@@ -518,16 +528,66 @@ func (w *Watcher) collect(cat *AgentCatalog) (Snapshot, error) {
 		log.Printf("agentwatch: connections: %v", err)
 		return snap, nil // process data alone is still useful
 	}
+	listening := map[uint32]bool{}
 	for _, c := range conns {
-		switch c.Status {
-		case "LISTEN":
+		if c.Status == "LISTEN" {
 			snap.ListenPorts[c.Pid] = append(snap.ListenPorts[c.Pid], int(c.Laddr.Port))
-		case "ESTABLISHED":
-			snap.RemoteEndpoints[c.Pid] = append(snap.RemoteEndpoints[c.Pid],
-				net.JoinHostPort(c.Raddr.IP, fmt.Sprint(c.Raddr.Port)))
+			listening[c.Laddr.Port] = true
+		}
+	}
+	for _, c := range conns {
+		if c.Status != "ESTABLISHED" {
+			continue
+		}
+		ep := net.JoinHostPort(c.Raddr.IP, fmt.Sprint(c.Raddr.Port))
+		snap.RemoteEndpoints[c.Pid] = append(snap.RemoteEndpoints[c.Pid], ep)
+		if !listening[c.Laddr.Port] { // accepted connections are not ours to report as "sending to"
+			snap.Outbound[c.Pid] = append(snap.Outbound[c.Pid], ep)
 		}
 	}
 	return snap, nil
+}
+
+// Conn is one established TCP connection this machine initiated and the
+// program that owns it, from the last scan (shared with the network monitor so the
+// system is scanned once, not twice).
+type Conn struct {
+	PID    int32
+	Name   string
+	Exe    string
+	User   string
+	Remote string // "ip:port"
+}
+
+func (w *Watcher) keepConnections(snap Snapshot) {
+	procs := make(map[int32]ProcInfo, len(snap.Procs))
+	for _, p := range snap.Procs {
+		procs[p.PID] = p
+	}
+	var out []Conn
+	for pid, eps := range snap.Outbound {
+		p := procs[pid]
+		for _, ep := range eps {
+			out = append(out, Conn{PID: pid, Name: p.Name, Exe: p.Exe, User: p.User, Remote: ep})
+		}
+	}
+	w.mu.Lock()
+	w.conns = out
+	w.mu.Unlock()
+}
+
+// Connections returns the outbound TCP connections seen by the last scan.
+func (w *Watcher) Connections() []Conn {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return append([]Conn(nil), w.conns...)
+}
+
+// LLMHost names the LLM API host an IP belonged to at the last lookup, or "".
+func (w *Watcher) LLMHost(ip string) string {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.llmIPs[ip]
 }
 
 // refreshLLMIPs resolves the catalog's LLM API hosts so connections can be

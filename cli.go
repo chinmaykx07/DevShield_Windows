@@ -55,6 +55,12 @@ Usage:
   sudo devshield profile <name>   silent | gaming | dev | off (off = original settings)
   devshield sinkhole              telemetry sinkhole status and what it blocks
   sudo devshield sinkhole on|off  block / unblock telemetry domains in /etc/hosts
+  devshield net [--all] [--json]  which program talks to whom (telemetry, LLM APIs, …);
+                                  --all includes loopback and local-network connections
+  devshield lan-privacy [--json]  what this machine reveals on local networks
+  sudo devshield lan-privacy on|off
+                                  LLMNR/mDNS off, random Wi-Fi MAC per network, IPv6
+                                  privacy addresses (off removes only DevShield's files)
   devshield egress [--json]       network quarantine and lockdown status
   sudo devshield block <id>       cut one agent (and its children) off the network
   sudo devshield unblock <id>     give it its network access back
@@ -68,6 +74,8 @@ Usage:
                                   tunnel's servers and the users you name
   sudo devshield lockdown confirm keep a lockdown started with --confirm-within
   sudo devshield lockdown off
+  sudo devshield restore-all      undo every system change DevShield made (network rules,
+                                  thermal, sinkhole, LAN privacy); approvals and log are kept
   devshield egress-restore        load the saved network rules and exit (run at boot,
                                   before the network starts, by devshield-egress.service)
   devshield version
@@ -155,6 +163,29 @@ func runCLI(args []string, stdout, stderr io.Writer) int {
 		return 0
 	case "lockdown":
 		return cliLockdown(cargs, socket, stdout, stderr)
+	case "restore-all":
+		resp, err := ipc.Call(socket, ipc.Request{Op: "restore-all"})
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		for _, s := range resp.Restore {
+			mark := "✅"
+			if !s.OK {
+				mark = "❌"
+			}
+			fmt.Fprintf(stdout, "%s %-45s %s\n", mark, s.What, s.Detail)
+		}
+		if !resp.OK {
+			fmt.Fprintf(stderr, "devshield: %s\n", resp.Error)
+			return 1
+		}
+		fmt.Fprintln(stdout, "\nThe system is back to how it was before DevShield changed it. Agent approvals and the audit log are kept.")
+		return 0
+	case "net":
+		return cliNet(cargs, socket, stdout, stderr)
+	case "lan-privacy":
+		return cliLANPrivacy(cargs, socket, stdout, stderr)
 	case "egress-restore":
 		return cliEgressRestore(cargs, stdout, stderr)
 	case "verify-log":
@@ -567,5 +598,126 @@ func cliEgressRestore(args []string, stdout, stderr io.Writer) int {
 	}
 	st := m.Status()
 	fmt.Fprintf(stdout, "network policy restored: lockdown %v, %d blocked agents\n", st.Lockdown != nil, len(st.Blocked))
+	return 0
+}
+
+func cliLANPrivacy(args []string, socket string, stdout, stderr io.Writer) int {
+	req := ipc.Request{Op: "lan-privacy"}
+	asJSON := false
+	for _, a := range args {
+		switch a {
+		case "on", "off":
+			req = ipc.Request{Op: "set-lan-privacy", Profile: a}
+		case "--json":
+			asJSON = true
+		default:
+			fmt.Fprintln(stderr, "usage: devshield lan-privacy [on|off] [--json]")
+			return 2
+		}
+	}
+	resp, ok := call(socket, req, stderr)
+	if !ok {
+		return 1
+	}
+	l := resp.LAN
+	if asJSON {
+		b, _ := json.MarshalIndent(l, "", "  ")
+		fmt.Fprintln(stdout, string(b))
+	} else {
+		if r := l.Result; r != nil {
+			for _, c := range r.Changed {
+				fmt.Fprintf(stdout, "  ✅ %s\n", c)
+			}
+			for _, s := range r.Skipped {
+				fmt.Fprintf(stdout, "  ⏭  %s\n", s)
+			}
+			for _, n := range r.Notes {
+				fmt.Fprintf(stdout, "  ·  %s\n", n)
+			}
+			fmt.Fprintln(stdout)
+		}
+		mark := func(bad bool) string {
+			if bad {
+				return "🔴"
+			}
+			return "🟢"
+		}
+		state := func(v string, bad bool) string { // unknown is never shown as good
+			if v == "unknown" || v == "n/a" {
+				return "❔"
+			}
+			return mark(bad)
+		}
+		fmt.Fprintf(stdout, "%s LLMNR: %s   %s mDNS: %s   %s IPv6 privacy addresses: %s\n",
+			state(l.LLMNR, l.LLMNR == "on"), l.LLMNR, state(l.MDNS, l.MDNS == "on"), l.MDNS,
+			state(l.IPv6Privacy, l.IPv6Privacy == "off"), l.IPv6Privacy)
+		for _, w := range l.WiFi {
+			state := "random address in use"
+			if w.Hardware {
+				state = "HARDWARE address — trackable across networks"
+			}
+			fmt.Fprintf(stdout, "%s Wi-Fi %s: %s (%s)\n", mark(w.Hardware), w.Name, w.MAC, state)
+		}
+		for _, w := range l.Warnings {
+			fmt.Fprintf(stdout, "  ⚠ %s\n", w)
+		}
+		if !l.Applied && l.Result == nil {
+			fmt.Fprintln(stdout, "\nTurn on with: sudo devshield lan-privacy on")
+		}
+	}
+	for _, w := range l.WiFi {
+		if w.Hardware {
+			return 3
+		}
+	}
+	if l.LLMNR == "on" || l.MDNS == "on" {
+		return 3
+	}
+	return 0
+}
+
+var netIcon = map[string]string{"telemetry": "📡", "llm": "🤖", "other": "🌐", "lan": "🏠", "loopback": "↩ "}
+
+func cliNet(args []string, socket string, stdout, stderr io.Writer) int {
+	all, asJSON := false, false
+	for _, a := range args {
+		switch a {
+		case "--all":
+			all = true
+		case "--json":
+			asJSON = true
+		default:
+			fmt.Fprintln(stderr, "usage: devshield net [--all] [--json]")
+			return 2
+		}
+	}
+	resp, ok := call(socket, ipc.Request{Op: "net"}, stderr)
+	if !ok {
+		return 1
+	}
+	if asJSON {
+		b, _ := json.MarshalIndent(resp.Net, "", "  ")
+		fmt.Fprintln(stdout, string(b))
+		return 0
+	}
+	shown, telemetry := 0, 0
+	fmt.Fprintf(stdout, "%-10s %-20s %7s  %-24s %s\n", "KIND", "PROGRAM", "PID", "REMOTE", "LIKELY")
+	for _, e := range resp.Net {
+		if e.Category == "telemetry" {
+			telemetry++
+		}
+		if !all && (e.Category == "loopback" || e.Category == "lan") {
+			continue
+		}
+		shown++
+		fmt.Fprintf(stdout, "%s %-7s %-20s %7d  %-24s %s\n", netIcon[e.Category], e.Category, truncate(e.Program, 20), e.PID, e.Remote, e.Host)
+	}
+	if shown == 0 {
+		fmt.Fprintln(stdout, "No outbound connections right now.")
+	}
+	fmt.Fprintln(stdout, "\nLabels come from IP addresses (shared CDNs can mislead). Updated every 10 s.")
+	if telemetry > 0 {
+		return 3
+	}
 	return 0
 }
